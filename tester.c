@@ -120,9 +120,9 @@ void allocate(int min_size, int random_size, int cc){
 
 
 		time_passed = stop_time(tv);
-		start_heap = end_heap() - start_heap;
+		start_heap = end_heap() - (int) start_heap;
 
-		printf("{'memory':%d,'time':%d}",(unsigned) start_heap ,time_passed);
+		printf("{'memory':%d,'time':%ld}",(unsigned) start_heap ,time_passed);
 
 		fflush(stdout);
 
