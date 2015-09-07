@@ -47,7 +47,7 @@ void add_after(struct node* here, struct node* add_node){
 }
 
 /*Adds a node first in a list, given its root*/
-struct node* addFirst(struct node* root, struct node* add_node){
+struct node* add_first(struct node* root, struct node* add_node){
 	root->prev = add_node;
 	add_node->next = root;
 	add_node->prev = NULL;

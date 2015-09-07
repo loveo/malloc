@@ -11,14 +11,14 @@ struct node{
  /*0 is not free, otherwise free*/
  int free;
  /*Points to the memory that the user can use*/
- void* chunkPointer;
+ void* chunk_pointer;
 
 };
 
-struct node* newNode(void*, size_t);
-void addEnd(struct node*, struct node*);
-void addHere(struct node*, struct node*);
-void addAfter(struct node*, struct node*);
-struct node* addFirst(struct node*, struct node*);
-void removeNext(struct node*);
-struct node* removeFirst(struct node*);
+struct node* new_node(void*, size_t);
+void add_end(struct node*, struct node*);
+void add_here(struct node*, struct node*);
+void add_after(struct node*, struct node*);
+struct node* add_first(struct node*, struct node*);
+void remove_next(struct node*);
+struct node* remove_first(struct node*);

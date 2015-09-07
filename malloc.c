@@ -450,7 +450,7 @@ void add_to_quick_list(struct node* node){
 			}else{/*Else add this node first in the list*/
 				node->next = NULL;
 				node->prev = NULL;
-				quick_list[i] = addFirst(quick_list[i],node);
+				quick_list[i] = add_first(quick_list[i],node);
 			}
 			return;
 		}else{
