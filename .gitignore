@@ -1,8 +1,8 @@
-//ignore all hash-files
+#ignore all hash-files
 *.gch
 
-//ignore old files
+#ignore old files
 old_files/
 
-//ignore work file
+#ignore work file
 a.out
