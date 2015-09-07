@@ -1,0 +1,3807 @@
+#ifndef _brk_h_
+#define _brk_h_
+
+
+#define MMAP      /* if defined use mmap() instead of sbrk/brk */
+
+#ifdef MMAP
+void * endHeap(void);
+#endif
+
+#ifndef	_UNISTD_H /* USE WITH CAUTION brk() and sbrk() have been removed from the POSIX standard, most systems implement them but the parameter types may vary */
+extern int brk(void *);
+extern void *sbrk( );
+#endif
+
+#endif /*_brk_h */
+#include "malloc.h"
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+
+struct node* list = NULL;
+void *breakAddress = 0;
+int SMALLEST_QUICK = 8;
+
+#define META_SIZE sizeof(struct node)
+#define make4(x) (((((x)-1)/4)*4)+4)
+
+#ifndef STRATEGY
+int STRATEGY = 1;
+#endif
+
+#ifdef NRQUICKLISTS
+int QUICK_STEPS = NRQUICKLISTS;
+
+#define BIGGEST_QUICK (SMALLEST_QUICK << (QUICK_STEPS-1))
+struct node* quickList[NRQUICKLISTS];
+#endif
+
+#ifndef NRQUICKLISTS
+int BIGGEST_QUICK = 128;
+int  QUICK_STEPS =  5;
+struct node* quickList[5];
+#endif
+
+
+void quickCut(struct node*, size_t);
+size_t pageRoundUp(size_t);
+void *chooseAndCut(struct node*, size_t);
+struct node* getQuickNode(size_t);
+struct node* createMemory(size_t);
+void concatNodes(struct node*);
+void concatNext(struct node*);
+void *firstMalloc(size_t);
+void *worstMalloc(size_t);
+void *bestMalloc(size_t);
+void *quickMalloc(size_t);
+void *quickRealloc(void*, size_t);
+void addToQuickList(struct node*);
+size_t roundUp(size_t);
+void *getChunkPointer(struct node*);
+void copy(struct node*, struct node*);
+int isQuickChunk(size_t);
+void quickConcat(struct node*);
+
+/*Returns the break point of the heap*/
+void * endHeap(void){
+if(breakAddress == 0) breakAddress = sbrk(0);
+return breakAddress;
+}
+
+
+/*Allocates a pointer to a chunk of the given size*/
+void *malloc(size_t size){
+if(size == 0) return NULL; /*Quick fix a la Robert*/
+/*Allign size*/
+size = make4(size);
+/*Check what strategy should be used*/
+switch(STRATEGY){
+case 1: return firstMalloc(size);
+case 2: return bestMalloc(size);
+case 3: return worstMalloc(size);
+case 4: return quickMalloc(size);
+}
+return NULL;
+}
+
+/*Frees memory from a given pointer*/
+void free(void *pointer){
+/*If it points nowhere, ignore it*/
+if(pointer == NULL) return;
+/*If malloc is using Quick Fit*/
+if(STRATEGY == 4){
+  /*Get the node containing the chunk*/
+  struct node* node = ((struct node*) pointer-1);
+  /*If this pointer wasn't given by malloc, ignore it since we can't free it*/
+  if(node->chunkPointer != pointer) return;
+  
+ /*If node is a 'Quick Node' treat it specially*/
+  if(node->size <= BIGGEST_QUICK){
+  	if((node->size & (node->size -1)) == 0){
+		addToQuickList(node);
+		return;
+	}
+
+  }
+  /*If not, set free flag as free*/
+  node->free = 1;
+  quickConcat(node);
+}else{/*If Quick Fit is not used*/
+ /*Get the node containing the chunk*/
+ struct node* node = ((struct node*)pointer-1);
+ /*IF this pointer wasn't given by malloc, ignore it*/
+ if(node->chunkPointer != pointer) return;
+ /*Set the node as free*/
+ node->free = 1;
+ /*Try to merge this node with neighbours*/
+ concatNodes(node);
+}
+
+}
+
+/*Reallocates memory for a given pointer and size*/
+void *realloc(void *pointer, size_t size){
+struct node* node;
+/*If pointer is NULL, allocate a new pointer for it*/
+if(pointer == NULL) return malloc(size);
+
+/*Allign the size*/
+size = make4(size);
+
+/*If Quick Fit is used, use another realloc method instead*/
+if(STRATEGY == 4) return quickRealloc(pointer, size);
+/*Get node containing this chunk*/
+node = ((struct node*)pointer-1);
+/*If this pointer points to a chunk given by malloc*/
+if(node->chunkPointer == pointer){
+ /*If the old size is equal to the wanted, return the old chunk*/
+ if(node->size == size) return node->chunkPointer;
+ /*If the old node is too large*/
+ if(node->size >= size){
+  /*Check if there is a point in cutting the old node*/
+  if(node->size - size - META_SIZE - 4 >= 0){
+   /*Return the old node, cutted to the new size*/
+   return chooseAndCut(node, size);
+  }
+ }else{/*If old node is too small*/
+  /*If next node is free and big enough to hold our wanted size*/
+  if(node->next != NULL && node->next->free && node->size + node->next->size + META_SIZE >= size){
+    /*Merge this node with the next one*/
+    concatNext(node);
+    /*If the newly merged node is worth cutting*/
+    if(node->size - size - META_SIZE - 4 >= 0){
+     /*Cut the newly merged node to save memory*/
+     chooseAndCut(node, size);
+   }
+  }else{/*If we can't merge with the next node*/
+   /*Create a new node (malloc)*/	 
+   struct node* newPointer = createMemory(size);
+   /*If given address was NULL, we are out of memory*/ 
+   if(newPointer == NULL) return NULL;
+   /*Copy contents from old node to new node*/
+   copy(node, newPointer);
+   /*Return a pointer to the new nodes chunk*/
+   return newPointer->chunkPointer;   
+  }
+
+ }
+ return pointer;
+}
+return NULL;
+}
+
+/*Chooses a node to use and tries to cut it to save some memory*/
+void *chooseAndCut(struct node* node, size_t size){
+ struct node* cutNode; 
+ node->free = 0;
+/*If node is worth cutting*/
+if(node-> size >= size + META_SIZE + 4){
+ /*Create a new node*/
+ cutNode = newNode(node->chunkPointer + size, node->size - size - META_SIZE);
+ /*Add the new node after the given node*/
+ addAfter(node, cutNode);
+ /*Mark the new node as free*/
+ cutNode->free = 1; 
+
+ /*Set the given nodes size to the wanted size*/
+ node->size = size;
+ 
+ /*If we are using Quick Fit*/
+ if(STRATEGY == 4){
+  /*If the left over size is small enough to fit Quick List*/
+  if(cutNode->size <= BIGGEST_QUICK){
+   /*If size is 8, 16, 32, 64 etc*/
+   if(cutNode->size & ((cutNode->size -1) == 0)){
+    /*Remove the node from the list and add it to the Quick List instead*/
+    node->next = cutNode->next;
+    cutNode->next = NULL;
+    cutNode->prev = NULL;
+    addToQuickList(cutNode);
+   }
+  }
+
+ }
+  
+  return node->chunkPointer;
+ }
+
+return node->chunkPointer;
+
+}
+
+/*Cuts a page into Quick Chunk of a given size*/
+void quickCut(struct node* node, size_t size){
+/*As long as the node can be cut*/
+while(node->size > size+META_SIZE){
+ /*Create a left over node*/
+ struct node* quickNode = newNode(node->chunkPointer + size, node->size -size-META_SIZE);
+ node->size = size;
+ node->next = NULL;
+ node->prev = NULL;
+ /*Add this node to the Quick List*/
+ addToQuickList(node);
+ /*Set this node as the left over node*/
+ node = quickNode;
+}/*Repeat until a Quick Node can't be cut*/
+
+/*Add the left over node to the ordinary list*/
+if(list == NULL)
+ list = node;
+else
+ addEnd(list, node);
+}
+
+/*Creates a memory node of the given size*/
+struct node* createMemory(size_t size){
+ void* p;
+ /*The size (multiple of page size) of the node*/
+ size_t nodeSize = pageRoundUp(size)*sysconf(_SC_PAGESIZE);
+ breakAddress = endHeap();
+ /*Ask for memory from mmap*/
+ p =  mmap(breakAddress, nodeSize, PROT_WRITE|PROT_READ,MAP_FIXED|MAP_SHARED|MAP_ANONYMOUS, -1,0 );
+ /*If an ok pointer was returned*/
+ if(p >= 0){
+  struct node* node;  
+  /*Increase the breakAdress for next mmap*/
+  breakAddress += nodeSize;
+  /*Create a node but remove header size from its size*/
+  node = newNode(p, nodeSize-META_SIZE);
+   
+ /*If we are using Quick Fit and node is small enough to fit Quick List*/
+ if(STRATEGY == 4 && size <= BIGGEST_QUICK){
+  /*Cut the node into many Quick Nodes*/
+  quickCut(node, size);
+  /*Return a free Quick Node*/
+  return getQuickNode(size);  
+ }else{/*If not using Quick Fit*/
+  /*Add the node to the free list*/
+  if(list == NULL){
+   list = node;
+  }else{
+   addEnd(list, node);
+  }
+  /*Try to cut the node if possible to save memory*/
+  chooseAndCut(node, size);
+ }
+  return node; 
+ }else{/*No memory left*/
+  return NULL;
+ }
+
+}
+
+/*Try to merge nodes with neighbours, only used in Quick Fit*/
+void quickConcat(struct node* node){
+/*If next node is free*/
+if(node->next != NULL && node->next->free){
+  struct node* next = node->next;
+  /*If next node is not a Quick Node*/
+  if(!isQuickChunk(next->size)){
+   /*If next node lies next to this node in the memory*/
+   if(node->chunkPointer + node->size == next){
+     /*Merge nodes and remove next node*/
+     node->size += META_SIZE + next->size;
+     removeNext(node);
+   }
+  }
+}
+
+/*If prev node is free*/
+if(node->prev != NULL && node->prev->free){
+ struct node* prev = node->prev;
+ /*If prev node is not a Quick Node*/
+ if(!isQuickChunk(prev->size)){
+  /*If prev node loes next to this node in the memory*/
+  if(prev->chunkPointer + prev->size == node){
+   /*Merge nodes and remove this node*/
+   prev->size += node->size + META_SIZE;
+   removeNext(prev);
+  }
+ }
+
+}
+
+
+}
+
+/*Try to merge node with neighbouring nodes*/
+void concatNodes(struct node* node){
+/*If next node is free*/
+if(node->next != NULL && node->next->free){
+ struct node* next = node->next;
+ /*Merge nodes and remove next*/
+ node->size += next->size + META_SIZE;
+ removeNext(node);
+}
+
+/*If prev node is free*/
+if(node->prev != NULL && node->prev->free){
+ struct node* prev = node->prev;
+ /*Merge nodes and remode this node*/
+ prev->size += node->size + META_SIZE;
+ removeNext(prev);
+}
+
+}
+
+/*Try to merge this node with next node*/
+void concatNext(struct node* node){
+/*If next node is free*/
+if(node->next != NULL && node->next->free){
+ struct node* next = node->next;
+ /*Merge nodes and remove next node*/
+ node->size += next->size + META_SIZE;
+ removeNext(node);
+}
+
+}
+
+/*Copy data from a node to another*/
+void copy(struct node* from, struct node* to){
+int *fromData, *toData;
+size_t i;
+fromData = from->chunkPointer;
+toData = to->chunkPointer;
+/*Copy data until the smallest size have been filled*/
+for(i = 0; i*4 < from->size && i * 4 < to->size; ++i)
+ toData[i] = fromData[i];
+}
+
+/*Does malloc according to First Fit algorithm*/
+void *firstMalloc(size_t size){
+struct node* current = list;
+/*Searches through the node list*/
+while(current != NULL){
+ /*If a node is free and big enough*/
+ if(current->free && current->size >= size){
+  /*Cut it if possible and return its address*/
+  return chooseAndCut(current, size); 
+ }
+ current = current->next;
+}
+/*If no chunk was found, create a new node and return it*/
+return getChunkPointer(createMemory(size));
+
+}
+
+/*Does malloc according to Worst Fit algorithm*/
+void *worstMalloc(size_t size){
+struct node* current = list;
+struct node* biggest = NULL;
+/*Loop through the entire list*/
+while(current != NULL){
+ /*If the found node is free and big enough*/
+ if(current-> free && current->size >= size){
+  /*If the found node is bigger then the old biggest*/
+  if(biggest == NULL || biggest->size < current->size){
+   /*Mark it as biggest*/
+   biggest = current; 
+  }
+ }
+ current = current->next;
+}
+/*If we didn't find a big enough node*/
+if(biggest == NULL){
+ /*Create a new node and return it*/
+ return getChunkPointer(createMemory(size));
+}else{
+ /*Return the biggest node found and cut it if possible*/
+ return chooseAndCut(biggest,size);
+}
+
+}
+
+/*Does malloc according to Best Fit algorithm*/
+void *bestMalloc(size_t size){
+struct node* current = list;
+struct node* closest = NULL;
+/*Loop through all nodes*/
+while(current != NULL){
+ /*If found node is free and big enough*/
+ if(current->free && current->size >= size){
+  /*If this node is smaller than the last smallest*/
+  if(closest == NULL || closest-> size > current->size){
+   /*Mark this node as best fit*/
+   closest = current;
+  }
+ }
+ current = current->next;
+}
+/*If no node was found*/
+if(closest == NULL){
+ /*Create a new node and return it*/
+ return getChunkPointer(createMemory(size));
+}else{
+ /*Return the smallest node and cut it if possible*/
+ return chooseAndCut(closest, size);
+}
+
+}
+
+/*Does malloc according to Quick Fit algorithm*/
+void *quickMalloc(size_t size){
+/*If the size is small enough to fit in a Quick List*/
+if(size <= BIGGEST_QUICK){
+ struct node* free;
+ /*Fetches a free node from the Quick List OR creates a new one*/
+ free = getQuickNode(size);
+ /*If the pointer is NULL, no memory is left*/
+ if(free == NULL) return NULL;
+ /*Mark this node as not free*/
+ free->free = 0;
+ /*Return the node*/
+ return free->chunkPointer;
+}else{/*For larger sizes, use firstMalloc*/
+ return firstMalloc(size);
+}
+
+}
+
+/*Realloc used only when Quick Fit is used*/
+void *quickRealloc(void *pointer, size_t size){
+struct node* node;
+struct node* newNode;
+void* p;
+/*If no pointer was given, retun NULL*/
+if(pointer == NULL) return NULL;
+/*Fetch the node holding this chunk*/
+node = (struct node*) pointer-1;
+/*If the pointer wasn't allocated by malloc, ignore call*/
+if(node->chunkPointer != pointer) return NULL;
+/*If wanted size was old size, return old node*/
+if(node->size == size) return node->chunkPointer;
+/*If new size still fits in the same Quick Node, return old node*/
+if(node->size >= size && size > node->size/2) return node->chunkPointer;
+
+/*Create a new node*/
+p = malloc(size);
+/*If pointer is NULL, no memory is left*/
+if(p == NULL) return NULL;
+/*Get the node*/
+newNode = ((struct node*) p-1 ); 
+/*Copy data from old node to new node*/
+copy(node, newNode);
+/*Free the old node*/
+free(node->chunkPointer);
+/*Return the new node*/
+return newNode->chunkPointer;
+}
+
+/*Add a free Quick Node to the Quick List, only used in Quick Fit*/
+void addToQuickList(struct node* node){
+int i,  pow = SMALLEST_QUICK;
+/*Figure out what index this size belongs to*/
+for(i = 0; i < QUICK_STEPS; ++i){
+if(node->size == pow){/*Correct index found*/
+ /*Mark node as free*/
+ node->free = 1;
+ /*If Quick List is empty, use this as the list*/
+ if(quickList[i] == NULL){
+  node->next = NULL;
+  node->prev = NULL;
+  quickList[i] = node;
+ }else{/*Else add this node first in the list*/
+  node->next = NULL;
+  node->prev = NULL;
+  quickList[i] = addFirst(quickList[i],node);
+ }
+ return;
+}else{
+pow *= 2;
+}
+}
+
+}
+
+/*Get a Quick Node from the Qiuck List OR create a new one if needed*/
+struct node *getQuickNode(size_t size){
+int i, tempSize = SMALLEST_QUICK;
+/*Figures out what index to use*/
+for(i = 0; i < QUICK_STEPS; ++i){
+ if(size <= tempSize){
+  /*If the Quick List is empty, create a new node*/
+  if(quickList[i] == NULL){
+   return createMemory(roundUp(size));
+  }else{
+   /*Return first node and remove it from the Quick List*/
+   struct node* free = quickList[i];
+   quickList[i] = removeFirst(free);
+   free->free = 0;
+   return free;
+  }
+
+ }
+ tempSize *= 2;
+}
+return NULL;
+}
+
+/*Rounds a size up to closest Quick Size (16,32, 64.. etc)*/
+size_t roundUp(size_t size){
+int i, temp = SMALLEST_QUICK;
+for(i = 0; i < QUICK_STEPS; ++i){
+ if(size <= temp) return temp;
+ temp *= 2;
+}
+return size;
+}
+
+/*Returns the correct amount of pages to use to a given size*/
+size_t pageRoundUp(size_t size){
+long pageSize = sysconf(_SC_PAGESIZE);
+return ((META_SIZE+size-1)/pageSize)+1;
+}
+
+/*Gets the chunk pointer from a node*/
+void *getChunkPointer(struct node * nodePointer){
+if(nodePointer == NULL) return NULL;
+return nodePointer->chunkPointer;
+}
+
+
+/*Checks if a size is a Quick Size*/
+int isQuickChunk(size_t size){
+if(size <= BIGGEST_QUICK)
+   if(size & ((size -1) == 0))
+	return 1;
+return 0;
+}
+
+
+#include "node.h"
+#include <sys/mman.h>
+
+void *malloc(size_t);
+void free(void*);
+void *realloc(void*, size_t);
+#include "node.h"
+#include <stdio.h>
+#define META_SIZE sizeof(struct node)
+
+/*Creates a node at the given address with the given size*/
+struct node * newNode(void* address, size_t size){
+ 
+ struct node *p ;
+ p = (struct node*) address;
+ /*Point below the node*/
+ p->chunkPointer = p + 1;
+ p->size = size;
+ p->free = 0; 
+
+ return (struct node*) address;
+
+}
+
+/*Adds a node to the end of a list, given its root*/
+void addEnd(struct node* root, struct node* endNode){
+ struct node *current = root;
+ while(current-> next != NULL)current = current->next;
+ current->next = endNode;
+ endNode->prev = current;
+ endNode->next = NULL;
+
+}
+
+/*Adds a node before a given node*/
+void addHere(struct node* here, struct node* addNode){
+ if(here->prev != NULL)
+ 	here->prev->next = addNode;
+ addNode->prev = here->prev;
+ here->prev = addNode;
+ addNode->next = here;
+
+}
+
+/*Adds a node after a given node*/
+void addAfter(struct node* here, struct node* addNode){
+ if(here->next == NULL){
+ 	here->next = addNode;
+	addNode->prev = here;
+	addNode->next = NULL;
+ }else{
+	addNode->next = here->next;
+	addNode->prev = here;
+	here->next->prev = addNode;
+	here->next = addNode;
+ }
+}
+
+/*Adds a node first in a list, given its root*/
+struct node* addFirst(struct node* root, struct node* addNode){
+ root->prev = addNode;
+ addNode->next = root;
+ addNode->prev = NULL;
+ return addNode;
+}
+
+/*Removes the next node given a node*/
+void removeNext(struct node* here){
+ struct node* next = here->next;
+ if(here->next == NULL) return;
+
+ if(here->next->next == NULL){
+  here->next->prev = NULL;
+  here->next = NULL;
+ }else{
+  next->next->prev = here;
+  next->prev = NULL;
+  here->next = next->next;
+  next->next = NULL;
+ } 
+}
+
+/*Removes the first node, given the root*/
+struct node* removeFirst(struct node* root){
+ struct node* temp;
+ if(root->next == NULL) return NULL;
+
+ temp = root->next;
+ temp->prev = NULL;
+ root->next = NULL;
+ return temp;
+
+}
+
+
+#include <stdlib.h>
+
+/*Holds meta data for the memory chunks*/
+struct node{
+ /*Points to the next memory node*/
+ struct node* prev;
+ /*Points to the prev memory node*/
+ struct node* next;
+ /*The size of the memory this node points to*/
+ size_t size;
+ /*0 is not free, otherwise free*/
+ int free;
+ /*Points to the memory that the user can use*/
+ void* chunkPointer;
+
+};
+
+struct node* newNode(void*, size_t);
+void addEnd(struct node*, struct node*);
+void addHere(struct node*, struct node*);
+void addAfter(struct node*, struct node*);
+struct node* addFirst(struct node*, struct node*);
+void removeNext(struct node*);
+struct node* removeFirst(struct node*);
+#include <stdio.h>
+#include <sys/wait.h>
+#include <stdlib.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+
+void startTime(struct timeval*);
+long stopTime(struct timeval);
+
+int status;
+
+#define SMALL_NUMBERS 100
+#define SMALL_SIZE 19
+#define SMALL_TIMES 100
+
+#define BIG_NUMBERS 50
+#define BIG_SIZE 84359
+#define BIG_TIMES 100
+
+#define SMALLEST_RANDOM 1
+#define BIGGEST_RANDOM 50000
+#define RANDOM_NUMBERS 250
+#define RANDOM_TIMES 100
+
+void startTime(struct timeval*);
+long stopTime(struct timeval);
+void testStrategy(void);
+void testAll(int);
+void allocate(int, int, int, int, char*);
+void allocateSmall(int);
+void allocateBig(int);
+void allocateRandom(int, int);
+
+int main(){
+
+testStrategy();
+
+exit(0);
+}
+
+
+
+void testStrategy(){
+int i;
+for(i = 1; i <= 1; ++i){
+ testAll(i);
+}
+}
+
+void testAll(int strat){
+ allocateSmall(strat);
+ allocateBig(strat);
+ allocateRandom(strat, 1717523);
+}
+
+
+void allocateSmall(int strat){
+int i;
+printf("Allocating %d * %d chunks %d times\n",SMALL_SIZE, SMALL_NUMBERS, SMALL_TIMES);
+fflush(stdout);
+for(i = 1; i<= SMALL_TIMES; ++i)
+	allocate(SMALL_SIZE, SMALL_NUMBERS, i, strat, "Small alloc test");
+
+}
+
+void allocateBig(int strat){
+int i;
+printf("Allocating %d * %d chunks %d timesn",BIG_SIZE, BIG_NUMBERS, BIG_TIMES);
+fflush(stdout);
+for(i = 1; i<= BIG_TIMES; ++i)
+	allocate(BIG_SIZE, BIG_NUMBERS, i, strat, "Big alloc test");
+
+}
+
+void allocateRandom(int strat, int seed){
+int i;
+int rand;
+
+printf("Allocating %d chunks between [%d and %d] %d times with seed %d\n",RANDOM_NUMBERS,SMALLEST_RANDOM, BIGGEST_RANDOM, RANDOM_TIMES, seed);
+fflush(stdout);
+for(i = 1; i <= RANDOM_TIMES; ++i){
+ int chunkSize;
+ rand = rand_r(&seed);
+ chunkSize = rand%(BIGGEST_RANDOM - SMALLEST_RANDOM);
+ chunkSize += SMALLEST_RANDOM; 
+ allocate(chunkSize, RANDOM_NUMBERS, i, strat, "Random alloc test");
+}
+
+}
+
+void allocate(int cs, int cc, int iter, int strat, char *print){
+
+if(fork() == 0){
+void * ptrs[cc];
+int i;
+struct timeval tv;
+long timePassed;
+void * memStart = sbrk(0);
+startTime(&tv);
+for(i = 0; i < cc; ++i)
+ ptrs[i] = malloc(cs);
+
+
+timePassed = stopTime(tv);
+
+printf("%s #%d (memory, time) - (%d, %d)\n",print, iter,sbrk(0)-memStart ,timePassed);
+
+fflush(stdout);
+
+exit(0);
+}
+
+wait(&status);
+}
+
+
+void startTime(struct timeval* tv){
+
+ gettimeofday(tv,NULL);
+}
+
+
+long stopTime(struct timeval oldTv){
+int sec, usec;
+long time;
+struct timeval currTv;
+gettimeofday(&currTv, NULL);
+sec = currTv.tv_sec - oldTv.tv_sec;
+usec = currTv.tv_usec - oldTv.tv_usec;
+time = sec*1000000+usec;
+return time;
+
+}
+#include "malloc.h"
+#include <stdio.h>
+#include <sys/wait.h>
+#include <stdlib.h>
+#include "brk.h"
+#include <sys/time.h>
+#include <unistd.h>
+
+
+void startTime(struct timeval*);
+long stopTime(struct timeval);
+
+int status;
+
+#define SMALL_NUMBERS 10000
+#define SMALL_SIZE 1
+#define SMALL_RANDOM 149
+#define SMALL_TIMES 100
+
+#define BIG_NUMBERS 100
+#define BIG_SIZE 8000
+#define BIG_TIMES 100
+#define BIG_RANDOM 2000
+
+#define RANDOM_SIZE 1
+#define RANDOM_RANDOM 299
+#define RANDOM_NUMBERS 1000
+#define RANDOM_TIMES 100
+
+void startTime(struct timeval*);
+long stopTime(struct timeval);
+void testAll(int);
+void allocate(int, int, int);
+void allocateSmall(int);
+void allocateBig(int);
+void allocateRandom(int);
+void prettyAllocate(int, int, int, int, int);
+//chose test strategy
+#ifndef STRATEGY
+#define STRATEGY 1 
+#endif
+
+#define SEED 15486433
+
+int main(){
+testAll(STRATEGY);
+exit(0);
+}
+
+
+
+void testAll(int strat){
+ printf("{'tests':[");
+ allocateSmall(strat);
+ printf(",");
+ allocateBig(strat);
+ printf(",")
+ allocateRandom(strat);
+ printf("]}");
+ fflush(stdout);
+}
+
+void prettyAllocate(int times, int chunks, int strat, int lower, int random){
+int i;
+printf("{'lowerBound':%d,'upperBound':%d,'strategy':%d,'data':[",strat,lower,lower+random);
+fflush(stdout);
+for(i = 1; i<= times; ++i){
+	if(i != 1) printf(",");
+	allocate(lower,random, chunks);
+}
+printf("]}");
+fflush(stdout);
+}
+
+void allocateSmall(int strat){
+	prettyAllocate(SMALL_TIMES, SMALL_NUMBERS, strat, SMALL_SIZE, SMALL_RANDOM);
+}
+
+void allocateBig(int strat){
+	prettyAllocate(BIG_TIMES, BIG_NUMBERS, strat, BIG_SIZE, BIG_RANDOM);
+}
+
+void allocateRandom(int strat){
+	prettyAllocate(RANDOM_TIMES, RANDOM_NUMBERS, strat, RANDOM_SIZE, RANDOM_RANDOM);
+}
+
+void allocate(int minSize, int randomSize, int cc){
+
+if(fork() == 0){
+void * ptrs[cc];
+int i;
+struct timeval tv;
+long timePassed;
+int seed = SEED;
+void *startHeap = endHeap();
+int chunkSize;
+startTime(&tv);
+
+for(i = 0; i < cc; ++i){
+ chunkSize = minSize + rand_r(&seed)%randomSize;
+ ptrs[i] = malloc(chunkSize);
+}
+
+for(i = 0; i < cc; ++i)
+ free(ptrs[i]);
+
+for(i = 0; i < cc; ++i){
+ chunkSize = minSize + rand_r(&seed)%randomSize;
+ ptrs[i] = malloc(cs);
+}
+
+for(i = 0; i < cc; ++i){
+ chunkSize = minSize + rand_r(&seed)%randomSize;
+ ptrs[i] = realloc(cs);
+}
+
+for(i = 0; i < cc; ++i)
+ free(ptrs[i]);
+
+
+timePassed = stopTime(tv);
+startHeap = endHeap() - startHeap;
+
+printf("{'memory':%d,'time':%d}",(unsigned) startHeap ,timePassed);
+
+fflush(stdout);
+
+exit(0);
+}
+
+wait(&status);
+}
+
+
+void startTime(struct timeval* tv){
+
+ gettimeofday(tv,NULL);
+}
+
+
+long stopTime(struct timeval oldTv){
+int sec, usec;
+long time;
+struct timeval currTv;
+gettimeofday(&currTv, NULL);
+sec = currTv.tv_sec - oldTv.tv_sec;
+usec = currTv.tv_usec - oldTv.tv_usec;
+time = sec*1000000+usec;
+return time;
+
+}
+TESTER
+
+För att testa våra algoritmer så har vi skrivit ett program tester.c som kan användas för att testa de olika algitmerna. Detta program testar att allokera små chunks, stora chunks och blandade chunks och mäter maximala minnesåtgången och tiden det tar. 
+
+För att ha något att jämföra med så har vi även skrivit realtester.c som gör samma test men som använder systemets malloc.
+
+Nedan följer anvisningar om hur våra test gick till.
+
+
+Test #1
+
+Uppställning för testet:
+Small chunks 10000 st à 52 byte
+Big chunks 100 st à 7894 
+Random chunks 250 st mellan 32-9999 bytes med random seed 1717523
+
+dvs
+SMALL_NUMBERS 10000
+SMALL_SIZE 52
+SMALL TIMES 100
+
+BIG_NUMBERS 100
+BIG_SIZE 7894
+BIG_TIMES 100
+
+SMALLEST_RANDOM 32
+BIGGEST_RANDOM 9999
+RANDOM_NUMBERS 250
+RANDOM_TIMES 100
+Kompilera och kör programmet en gång för varje algoritm med följande kommandon:
+
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=1
+./a.out
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=2
+./a.out
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=3
+./a.out
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=4
+./a.out
+
+
+Sätt samma värden i realtester.c och kompilera och kör 
+
+gcc realtester.c -O4 
+./a.out
+
+
+
+
+
+
+Test #2
+
+Uppställning för testet:
+Small chunks 100 st à 19 byte
+Big chunks 50 st à 59843
+Random chunks 250 st mellan 1-50000 bytes med random seed 1717523
+
+dvs
+SMALL_NUMBERS 100
+SMALL_SIZE 19
+SMALL TIMES 100
+
+BIG_NUMBERS 50
+BIG_SIZE 59843
+BIG_TIMES 100
+
+SMALLEST_RANDOM 1
+BIGGEST_RANDOM 50000
+RANDOM_NUMBERS 250
+RANDOM_TIMES 100
+Kompilera och kör programmet en gång för varje algoritm med följande kommandon:
+
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=1
+./a.out
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=2
+./a.out
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=3
+./a.out
+gcc node.c malloc.c tester.c -O4 -DSTRATEGY=4
+./a.out
+
+
+Sätt samma värden i realtester.c och kompilera och kör 
+
+gcc realtester.c -O4 
+./a.out
+
+
+Alla dessa tester körs 100 gånger för att ett medelvärde ska kunna skapas av datan.
+Dessa tester kördes på ICT-skolans shell-server colombiana.
+
+
+Utöver dessa tester så kördes även korrekthetstesterna som finns på kurswebben: http://www.ict.kth.se/courses/ID2206/COURSELIB/labs/malloc/
+
+Resultat och utskrifter för samtliga tester finns nedan.
+
+
+Resultat från test #1:
+
+Allocating 52 * 10000 chunks 100 times with stragety 1
+Small alloc test #1 (memory, time) - (933888, 787292)
+Small alloc test #2 (memory, time) - (933888, 795167)
+Small alloc test #3 (memory, time) - (933888, 787392)
+Small alloc test #4 (memory, time) - (933888, 815273)
+Small alloc test #5 (memory, time) - (933888, 791600)
+Small alloc test #6 (memory, time) - (933888, 782640)
+Small alloc test #7 (memory, time) - (933888, 807812)
+Small alloc test #8 (memory, time) - (933888, 795021)
+Small alloc test #9 (memory, time) - (933888, 785910)
+Small alloc test #10 (memory, time) - (933888, 779763)
+Small alloc test #11 (memory, time) - (933888, 784804)
+Small alloc test #12 (memory, time) - (933888, 806408)
+Small alloc test #13 (memory, time) - (933888, 816222)
+Small alloc test #14 (memory, time) - (933888, 800844)
+Small alloc test #15 (memory, time) - (933888, 769585)
+Small alloc test #16 (memory, time) - (933888, 795595)
+Small alloc test #17 (memory, time) - (933888, 816812)
+Small alloc test #18 (memory, time) - (933888, 798274)
+Small alloc test #19 (memory, time) - (933888, 795807)
+Small alloc test #20 (memory, time) - (933888, 816021)
+Small alloc test #21 (memory, time) - (933888, 808762)
+Small alloc test #22 (memory, time) - (933888, 788877)
+Small alloc test #23 (memory, time) - (933888, 805748)
+Small alloc test #24 (memory, time) - (933888, 801692)
+Small alloc test #25 (memory, time) - (933888, 810342)
+Small alloc test #26 (memory, time) - (933888, 808417)
+Small alloc test #27 (memory, time) - (933888, 806193)
+Small alloc test #28 (memory, time) - (933888, 811435)
+Small alloc test #29 (memory, time) - (933888, 806506)
+Small alloc test #30 (memory, time) - (933888, 792396)
+Small alloc test #31 (memory, time) - (933888, 816396)
+Small alloc test #32 (memory, time) - (933888, 809905)
+Small alloc test #33 (memory, time) - (933888, 775618)
+Small alloc test #34 (memory, time) - (933888, 810238)
+Small alloc test #35 (memory, time) - (933888, 802249)
+Small alloc test #36 (memory, time) - (933888, 785099)
+Small alloc test #37 (memory, time) - (933888, 818799)
+Small alloc test #38 (memory, time) - (933888, 810064)
+Small alloc test #39 (memory, time) - (933888, 771735)
+Small alloc test #40 (memory, time) - (933888, 800935)
+Small alloc test #41 (memory, time) - (933888, 830889)
+Small alloc test #42 (memory, time) - (933888, 788273)
+Small alloc test #43 (memory, time) - (933888, 809575)
+Small alloc test #44 (memory, time) - (933888, 798009)
+Small alloc test #45 (memory, time) - (933888, 818886)
+Small alloc test #46 (memory, time) - (933888, 799216)
+Small alloc test #47 (memory, time) - (933888, 793785)
+Small alloc test #48 (memory, time) - (933888, 795493)
+Small alloc test #49 (memory, time) - (933888, 797748)
+Small alloc test #50 (memory, time) - (933888, 824914)
+Small alloc test #51 (memory, time) - (933888, 779891)
+Small alloc test #52 (memory, time) - (933888, 799854)
+Small alloc test #53 (memory, time) - (933888, 829546)
+Small alloc test #54 (memory, time) - (933888, 812301)
+Small alloc test #55 (memory, time) - (933888, 821265)
+Small alloc test #56 (memory, time) - (933888, 765416)
+Small alloc test #57 (memory, time) - (933888, 828142)
+Small alloc test #58 (memory, time) - (933888, 801645)
+Small alloc test #59 (memory, time) - (933888, 791915)
+Small alloc test #60 (memory, time) - (933888, 802413)
+Small alloc test #61 (memory, time) - (933888, 800964)
+Small alloc test #62 (memory, time) - (933888, 805850)
+Small alloc test #63 (memory, time) - (933888, 788545)
+Small alloc test #64 (memory, time) - (933888, 825487)
+Small alloc test #65 (memory, time) - (933888, 800489)
+Small alloc test #66 (memory, time) - (933888, 844325)
+Small alloc test #67 (memory, time) - (933888, 805721)
+Small alloc test #68 (memory, time) - (933888, 816109)
+Small alloc test #69 (memory, time) - (933888, 790018)
+Small alloc test #70 (memory, time) - (933888, 812263)
+Small alloc test #71 (memory, time) - (933888, 806846)
+Small alloc test #72 (memory, time) - (933888, 829098)
+Small alloc test #73 (memory, time) - (933888, 811795)
+Small alloc test #74 (memory, time) - (933888, 809807)
+Small alloc test #75 (memory, time) - (933888, 819184)
+Small alloc test #76 (memory, time) - (933888, 783693)
+Small alloc test #77 (memory, time) - (933888, 815783)
+Small alloc test #78 (memory, time) - (933888, 826971)
+Small alloc test #79 (memory, time) - (933888, 798086)
+Small alloc test #80 (memory, time) - (933888, 810119)
+Small alloc test #81 (memory, time) - (933888, 833573)
+Small alloc test #82 (memory, time) - (933888, 806633)
+Small alloc test #83 (memory, time) - (933888, 810159)
+Small alloc test #84 (memory, time) - (933888, 813435)
+Small alloc test #85 (memory, time) - (933888, 831561)
+Small alloc test #86 (memory, time) - (933888, 820244)
+Small alloc test #87 (memory, time) - (933888, 803705)
+Small alloc test #88 (memory, time) - (933888, 830979)
+Small alloc test #89 (memory, time) - (933888, 846657)
+Small alloc test #90 (memory, time) - (933888, 789078)
+Small alloc test #91 (memory, time) - (933888, 809538)
+Small alloc test #92 (memory, time) - (933888, 828110)
+Small alloc test #93 (memory, time) - (933888, 805292)
+Small alloc test #94 (memory, time) - (933888, 793702)
+Small alloc test #95 (memory, time) - (933888, 828769)
+Small alloc test #96 (memory, time) - (933888, 784025)
+Small alloc test #97 (memory, time) - (933888, 827750)
+Small alloc test #98 (memory, time) - (933888, 815957)
+Small alloc test #99 (memory, time) - (933888, 799120)
+Small alloc test #100 (memory, time) - (933888, 819573)
+Allocating 7894 * 100 chunks 100 times with stragety 1
+Big alloc test #1 (memory, time) - (819200, 3416)
+Big alloc test #2 (memory, time) - (819200, 3463)
+Big alloc test #3 (memory, time) - (819200, 3432)
+Big alloc test #4 (memory, time) - (819200, 3220)
+Big alloc test #5 (memory, time) - (819200, 3572)
+Big alloc test #6 (memory, time) - (819200, 3193)
+Big alloc test #7 (memory, time) - (819200, 3644)
+Big alloc test #8 (memory, time) - (819200, 3419)
+Big alloc test #9 (memory, time) - (819200, 3248)
+Big alloc test #10 (memory, time) - (819200, 3397)
+Big alloc test #11 (memory, time) - (819200, 3289)
+Big alloc test #12 (memory, time) - (819200, 3603)
+Big alloc test #13 (memory, time) - (819200, 3280)
+Big alloc test #14 (memory, time) - (819200, 3401)
+Big alloc test #15 (memory, time) - (819200, 3549)
+Big alloc test #16 (memory, time) - (819200, 3422)
+Big alloc test #17 (memory, time) - (819200, 3428)
+Big alloc test #18 (memory, time) - (819200, 3265)
+Big alloc test #19 (memory, time) - (819200, 3221)
+Big alloc test #20 (memory, time) - (819200, 3311)
+Big alloc test #21 (memory, time) - (819200, 3104)
+Big alloc test #22 (memory, time) - (819200, 3574)
+Big alloc test #23 (memory, time) - (819200, 3584)
+Big alloc test #24 (memory, time) - (819200, 3198)
+Big alloc test #25 (memory, time) - (819200, 3550)
+Big alloc test #26 (memory, time) - (819200, 3349)
+Big alloc test #27 (memory, time) - (819200, 3272)
+Big alloc test #28 (memory, time) - (819200, 3626)
+Big alloc test #29 (memory, time) - (819200, 3252)
+Big alloc test #30 (memory, time) - (819200, 3328)
+Big alloc test #31 (memory, time) - (819200, 3750)
+Big alloc test #32 (memory, time) - (819200, 3313)
+Big alloc test #33 (memory, time) - (819200, 3570)
+Big alloc test #34 (memory, time) - (819200, 3351)
+Big alloc test #35 (memory, time) - (819200, 3396)
+Big alloc test #36 (memory, time) - (819200, 3477)
+Big alloc test #37 (memory, time) - (819200, 3258)
+Big alloc test #38 (memory, time) - (819200, 3223)
+Big alloc test #39 (memory, time) - (819200, 3299)
+Big alloc test #40 (memory, time) - (819200, 3320)
+Big alloc test #41 (memory, time) - (819200, 3174)
+Big alloc test #42 (memory, time) - (819200, 3057)
+Big alloc test #43 (memory, time) - (819200, 3598)
+Big alloc test #44 (memory, time) - (819200, 3237)
+Big alloc test #45 (memory, time) - (819200, 3521)
+Big alloc test #46 (memory, time) - (819200, 3245)
+Big alloc test #47 (memory, time) - (819200, 3347)
+Big alloc test #48 (memory, time) - (819200, 3248)
+Big alloc test #49 (memory, time) - (819200, 3290)
+Big alloc test #50 (memory, time) - (819200, 3497)
+Big alloc test #51 (memory, time) - (819200, 3254)
+Big alloc test #52 (memory, time) - (819200, 3328)
+Big alloc test #53 (memory, time) - (819200, 3642)
+Big alloc test #54 (memory, time) - (819200, 3429)
+Big alloc test #55 (memory, time) - (819200, 3474)
+Big alloc test #56 (memory, time) - (819200, 3458)
+Big alloc test #57 (memory, time) - (819200, 3287)
+Big alloc test #58 (memory, time) - (819200, 3468)
+Big alloc test #59 (memory, time) - (819200, 3363)
+Big alloc test #60 (memory, time) - (819200, 3142)
+Big alloc test #61 (memory, time) - (819200, 3641)
+Big alloc test #62 (memory, time) - (819200, 3544)
+Big alloc test #63 (memory, time) - (819200, 3286)
+Big alloc test #64 (memory, time) - (819200, 3543)
+Big alloc test #65 (memory, time) - (819200, 3205)
+Big alloc test #66 (memory, time) - (819200, 3558)
+Big alloc test #67 (memory, time) - (819200, 3330)
+Big alloc test #68 (memory, time) - (819200, 3280)
+Big alloc test #69 (memory, time) - (819200, 3309)
+Big alloc test #70 (memory, time) - (819200, 3382)
+Big alloc test #71 (memory, time) - (819200, 3399)
+Big alloc test #72 (memory, time) - (819200, 3438)
+Big alloc test #73 (memory, time) - (819200, 3478)
+Big alloc test #74 (memory, time) - (819200, 3492)
+Big alloc test #75 (memory, time) - (819200, 3290)
+Big alloc test #76 (memory, time) - (819200, 3212)
+Big alloc test #77 (memory, time) - (819200, 3289)
+Big alloc test #78 (memory, time) - (819200, 3149)
+Big alloc test #79 (memory, time) - (819200, 3480)
+Big alloc test #80 (memory, time) - (819200, 3453)
+Big alloc test #81 (memory, time) - (819200, 3242)
+Big alloc test #82 (memory, time) - (819200, 3531)
+Big alloc test #83 (memory, time) - (819200, 3302)
+Big alloc test #84 (memory, time) - (819200, 3465)
+Big alloc test #85 (memory, time) - (819200, 3377)
+Big alloc test #86 (memory, time) - (819200, 3575)
+Big alloc test #87 (memory, time) - (819200, 3349)
+Big alloc test #88 (memory, time) - (819200, 3353)
+Big alloc test #89 (memory, time) - (819200, 3354)
+Big alloc test #90 (memory, time) - (819200, 3341)
+Big alloc test #91 (memory, time) - (819200, 3390)
+Big alloc test #92 (memory, time) - (819200, 3539)
+Big alloc test #93 (memory, time) - (819200, 3507)
+Big alloc test #94 (memory, time) - (819200, 3303)
+Big alloc test #95 (memory, time) - (819200, 3103)
+Big alloc test #96 (memory, time) - (819200, 3406)
+Big alloc test #97 (memory, time) - (819200, 3399)
+Big alloc test #98 (memory, time) - (819200, 3244)
+Big alloc test #99 (memory, time) - (819200, 3519)
+Big alloc test #100 (memory, time) - (819200, 3289)
+Allocating 250 chunks between [32 and 9999] 100 times with stragety 1 and seed 1717523
+Random alloc test #1 (memory, time) - (2048000, 10581)
+Random alloc test #2 (memory, time) - (1024000, 9815)
+Random alloc test #3 (memory, time) - (1024000, 9409)
+Random alloc test #4 (memory, time) - (2048000, 11402)
+Random alloc test #5 (memory, time) - (3072000, 10540)
+Random alloc test #6 (memory, time) - (3072000, 10262)
+Random alloc test #7 (memory, time) - (114688, 1269)
+Random alloc test #8 (memory, time) - (2048000, 10783)
+Random alloc test #9 (memory, time) - (2048000, 10435)
+Random alloc test #10 (memory, time) - (2048000, 10198)
+Random alloc test #11 (memory, time) - (1024000, 9853)
+Random alloc test #12 (memory, time) - (1024000, 10408)
+Random alloc test #13 (memory, time) - (1024000, 9481)
+Random alloc test #14 (memory, time) - (512000, 4183)
+Random alloc test #15 (memory, time) - (2048000, 10664)
+Random alloc test #16 (memory, time) - (512000, 4152)
+Random alloc test #17 (memory, time) - (1024000, 9657)
+Random alloc test #18 (memory, time) - (172032, 1647)
+Random alloc test #19 (memory, time) - (258048, 2110)
+Random alloc test #20 (memory, time) - (3072000, 10538)
+Random alloc test #21 (memory, time) - (344064, 2897)
+Random alloc test #22 (memory, time) - (1024000, 10127)
+Random alloc test #23 (memory, time) - (2048000, 10196)
+Random alloc test #24 (memory, time) - (1024000, 9767)
+Random alloc test #25 (memory, time) - (131072, 1359)
+Random alloc test #26 (memory, time) - (1024000, 9455)
+Random alloc test #27 (memory, time) - (3072000, 10214)
+Random alloc test #28 (memory, time) - (3072000, 10101)
+Random alloc test #29 (memory, time) - (2048000, 10565)
+Random alloc test #30 (memory, time) - (3072000, 10689)
+Random alloc test #31 (memory, time) - (1024000, 9395)
+Random alloc test #32 (memory, time) - (2048000, 11495)
+Random alloc test #33 (memory, time) - (2048000, 10705)
+Random alloc test #34 (memory, time) - (2048000, 10759)
+Random alloc test #35 (memory, time) - (2048000, 10712)
+Random alloc test #36 (memory, time) - (3072000, 11454)
+Random alloc test #37 (memory, time) - (2048000, 10808)
+Random alloc test #38 (memory, time) - (3072000, 10811)
+Random alloc test #39 (memory, time) - (2048000, 10597)
+Random alloc test #40 (memory, time) - (2048000, 10564)
+Random alloc test #41 (memory, time) - (2048000, 11599)
+Random alloc test #42 (memory, time) - (3072000, 11197)
+Random alloc test #43 (memory, time) - (1024000, 10239)
+Random alloc test #44 (memory, time) - (1024000, 9838)
+Random alloc test #45 (memory, time) - (3072000, 10985)
+Random alloc test #46 (memory, time) - (2048000, 10594)
+Random alloc test #47 (memory, time) - (2048000, 10672)
+Random alloc test #48 (memory, time) - (3072000, 10970)
+Random alloc test #49 (memory, time) - (1024000, 10841)
+Random alloc test #50 (memory, time) - (2048000, 11132)
+Random alloc test #51 (memory, time) - (204800, 1780)
+Random alloc test #52 (memory, time) - (1024000, 9696)
+Random alloc test #53 (memory, time) - (512000, 4454)
+Random alloc test #54 (memory, time) - (2048000, 10640)
+Random alloc test #55 (memory, time) - (69632, 917)
+Random alloc test #56 (memory, time) - (2048000, 10730)
+Random alloc test #57 (memory, time) - (1024000, 10420)
+Random alloc test #58 (memory, time) - (2048000, 11036)
+Random alloc test #59 (memory, time) - (2048000, 11031)
+Random alloc test #60 (memory, time) - (2048000, 10736)
+Random alloc test #61 (memory, time) - (2048000, 10396)
+Random alloc test #62 (memory, time) - (2048000, 8241)
+Random alloc test #63 (memory, time) - (258048, 2263)
+Random alloc test #64 (memory, time) - (2048000, 11384)
+Random alloc test #65 (memory, time) - (2048000, 11700)
+Random alloc test #66 (memory, time) - (2048000, 10761)
+Random alloc test #67 (memory, time) - (2048000, 10435)
+Random alloc test #68 (memory, time) - (2048000, 10505)
+Random alloc test #69 (memory, time) - (2048000, 11051)
+Random alloc test #70 (memory, time) - (1024000, 10077)
+Random alloc test #71 (memory, time) - (3072000, 11014)
+Random alloc test #72 (memory, time) - (2048000, 11077)
+Random alloc test #73 (memory, time) - (2048000, 10893)
+Random alloc test #74 (memory, time) - (3072000, 10742)
+Random alloc test #75 (memory, time) - (1024000, 10025)
+Random alloc test #76 (memory, time) - (512000, 4384)
+Random alloc test #77 (memory, time) - (1024000, 9797)
+Random alloc test #78 (memory, time) - (3072000, 11505)
+Random alloc test #79 (memory, time) - (2048000, 11627)
+Random alloc test #80 (memory, time) - (3072000, 10810)
+Random alloc test #81 (memory, time) - (2048000, 10542)
+Random alloc test #82 (memory, time) - (1024000, 10089)
+Random alloc test #83 (memory, time) - (3072000, 10362)
+Random alloc test #84 (memory, time) - (1024000, 10281)
+Random alloc test #85 (memory, time) - (2048000, 11095)
+Random alloc test #86 (memory, time) - (1024000, 9970)
+Random alloc test #87 (memory, time) - (102400, 957)
+Random alloc test #88 (memory, time) - (2048000, 10866)
+Random alloc test #89 (memory, time) - (2048000, 10797)
+Random alloc test #90 (memory, time) - (2048000, 11265)
+Random alloc test #91 (memory, time) - (258048, 2568)
+Random alloc test #92 (memory, time) - (147456, 1489)
+Random alloc test #93 (memory, time) - (3072000, 10852)
+Random alloc test #94 (memory, time) - (2048000, 8838)
+Random alloc test #95 (memory, time) - (2048000, 10788)
+Random alloc test #96 (memory, time) - (45056, 449)
+Random alloc test #97 (memory, time) - (2048000, 10724)
+Random alloc test #98 (memory, time) - (258048, 2596)
+Random alloc test #99 (memory, time) - (2048000, 10398)
+Random alloc test #100 (memory, time) - (1024000, 10121)
+Allocating 52 * 10000 chunks 100 times with stragety 2
+Small alloc test #1 (memory, time) - (933888, 883381)
+Small alloc test #2 (memory, time) - (933888, 885254)
+Small alloc test #3 (memory, time) - (933888, 874489)
+Small alloc test #4 (memory, time) - (933888, 891843)
+Small alloc test #5 (memory, time) - (933888, 889103)
+Small alloc test #6 (memory, time) - (933888, 874679)
+Small alloc test #7 (memory, time) - (933888, 872046)
+Small alloc test #8 (memory, time) - (933888, 861424)
+Small alloc test #9 (memory, time) - (933888, 866340)
+Small alloc test #10 (memory, time) - (933888, 841111)
+Small alloc test #11 (memory, time) - (933888, 861060)
+Small alloc test #12 (memory, time) - (933888, 857942)
+Small alloc test #13 (memory, time) - (933888, 866827)
+Small alloc test #14 (memory, time) - (933888, 835861)
+Small alloc test #15 (memory, time) - (933888, 872351)
+Small alloc test #16 (memory, time) - (933888, 852168)
+Small alloc test #17 (memory, time) - (933888, 882809)
+Small alloc test #18 (memory, time) - (933888, 886065)
+Small alloc test #19 (memory, time) - (933888, 839798)
+Small alloc test #20 (memory, time) - (933888, 861082)
+Small alloc test #21 (memory, time) - (933888, 849970)
+Small alloc test #22 (memory, time) - (933888, 875754)
+Small alloc test #23 (memory, time) - (933888, 856482)
+Small alloc test #24 (memory, time) - (933888, 876608)
+Small alloc test #25 (memory, time) - (933888, 866637)
+Small alloc test #26 (memory, time) - (933888, 881985)
+Small alloc test #27 (memory, time) - (933888, 898362)
+Small alloc test #28 (memory, time) - (933888, 857209)
+Small alloc test #29 (memory, time) - (933888, 875908)
+Small alloc test #30 (memory, time) - (933888, 906359)
+Small alloc test #31 (memory, time) - (933888, 856107)
+Small alloc test #32 (memory, time) - (933888, 886285)
+Small alloc test #33 (memory, time) - (933888, 843676)
+Small alloc test #34 (memory, time) - (933888, 844850)
+Small alloc test #35 (memory, time) - (933888, 853782)
+Small alloc test #36 (memory, time) - (933888, 835377)
+Small alloc test #37 (memory, time) - (933888, 856784)
+Small alloc test #38 (memory, time) - (933888, 838477)
+Small alloc test #39 (memory, time) - (933888, 836014)
+Small alloc test #40 (memory, time) - (933888, 834904)
+Small alloc test #41 (memory, time) - (933888, 849555)
+Small alloc test #42 (memory, time) - (933888, 827934)
+Small alloc test #43 (memory, time) - (933888, 838914)
+Small alloc test #44 (memory, time) - (933888, 839510)
+Small alloc test #45 (memory, time) - (933888, 832629)
+Small alloc test #46 (memory, time) - (933888, 837924)
+Small alloc test #47 (memory, time) - (933888, 840790)
+Small alloc test #48 (memory, time) - (933888, 839044)
+Small alloc test #49 (memory, time) - (933888, 855368)
+Small alloc test #50 (memory, time) - (933888, 856149)
+Small alloc test #51 (memory, time) - (933888, 853231)
+Small alloc test #52 (memory, time) - (933888, 842154)
+Small alloc test #53 (memory, time) - (933888, 837952)
+Small alloc test #54 (memory, time) - (933888, 849733)
+Small alloc test #55 (memory, time) - (933888, 838940)
+Small alloc test #56 (memory, time) - (933888, 825068)
+Small alloc test #57 (memory, time) - (933888, 844841)
+Small alloc test #58 (memory, time) - (933888, 848540)
+Small alloc test #59 (memory, time) - (933888, 829053)
+Small alloc test #60 (memory, time) - (933888, 848285)
+Small alloc test #61 (memory, time) - (933888, 854473)
+Small alloc test #62 (memory, time) - (933888, 867064)
+Small alloc test #63 (memory, time) - (933888, 855139)
+Small alloc test #64 (memory, time) - (933888, 848005)
+Small alloc test #65 (memory, time) - (933888, 848177)
+Small alloc test #66 (memory, time) - (933888, 851917)
+Small alloc test #67 (memory, time) - (933888, 846958)
+Small alloc test #68 (memory, time) - (933888, 848081)
+Small alloc test #69 (memory, time) - (933888, 844950)
+Small alloc test #70 (memory, time) - (933888, 831863)
+Small alloc test #71 (memory, time) - (933888, 845964)
+Small alloc test #72 (memory, time) - (933888, 839394)
+Small alloc test #73 (memory, time) - (933888, 846077)
+Small alloc test #74 (memory, time) - (933888, 833552)
+Small alloc test #75 (memory, time) - (933888, 851761)
+Small alloc test #76 (memory, time) - (933888, 837891)
+Small alloc test #77 (memory, time) - (933888, 830143)
+Small alloc test #78 (memory, time) - (933888, 837682)
+Small alloc test #79 (memory, time) - (933888, 844886)
+Small alloc test #80 (memory, time) - (933888, 830174)
+Small alloc test #81 (memory, time) - (933888, 841653)
+Small alloc test #82 (memory, time) - (933888, 836151)
+Small alloc test #83 (memory, time) - (933888, 824380)
+Small alloc test #84 (memory, time) - (933888, 828818)
+Small alloc test #85 (memory, time) - (933888, 848988)
+Small alloc test #86 (memory, time) - (933888, 841018)
+Small alloc test #87 (memory, time) - (933888, 833550)
+Small alloc test #88 (memory, time) - (933888, 833639)
+Small alloc test #89 (memory, time) - (933888, 835114)
+Small alloc test #90 (memory, time) - (933888, 837394)
+Small alloc test #91 (memory, time) - (933888, 822952)
+Small alloc test #92 (memory, time) - (933888, 833913)
+Small alloc test #93 (memory, time) - (933888, 838022)
+Small alloc test #94 (memory, time) - (933888, 837950)
+Small alloc test #95 (memory, time) - (933888, 828982)
+Small alloc test #96 (memory, time) - (933888, 908619)
+Small alloc test #97 (memory, time) - (933888, 863869)
+Small alloc test #98 (memory, time) - (933888, 887051)
+Small alloc test #99 (memory, time) - (933888, 839239)
+Small alloc test #100 (memory, time) - (933888, 840319)
+Allocating 7894 * 100 chunks 100 times with stragety 2
+Big alloc test #1 (memory, time) - (819200, 3530)
+Big alloc test #2 (memory, time) - (819200, 3258)
+Big alloc test #3 (memory, time) - (819200, 3309)
+Big alloc test #4 (memory, time) - (819200, 3121)
+Big alloc test #5 (memory, time) - (819200, 3109)
+Big alloc test #6 (memory, time) - (819200, 3275)
+Big alloc test #7 (memory, time) - (819200, 3187)
+Big alloc test #8 (memory, time) - (819200, 3228)
+Big alloc test #9 (memory, time) - (819200, 3264)
+Big alloc test #10 (memory, time) - (819200, 3241)
+Big alloc test #11 (memory, time) - (819200, 3208)
+Big alloc test #12 (memory, time) - (819200, 3178)
+Big alloc test #13 (memory, time) - (819200, 3264)
+Big alloc test #14 (memory, time) - (819200, 3136)
+Big alloc test #15 (memory, time) - (819200, 3178)
+Big alloc test #16 (memory, time) - (819200, 3325)
+Big alloc test #17 (memory, time) - (819200, 3172)
+Big alloc test #18 (memory, time) - (819200, 3186)
+Big alloc test #19 (memory, time) - (819200, 3325)
+Big alloc test #20 (memory, time) - (819200, 3319)
+Big alloc test #21 (memory, time) - (819200, 3329)
+Big alloc test #22 (memory, time) - (819200, 3315)
+Big alloc test #23 (memory, time) - (819200, 3294)
+Big alloc test #24 (memory, time) - (819200, 3138)
+Big alloc test #25 (memory, time) - (819200, 3171)
+Big alloc test #26 (memory, time) - (819200, 3326)
+Big alloc test #27 (memory, time) - (819200, 3211)
+Big alloc test #28 (memory, time) - (819200, 3204)
+Big alloc test #29 (memory, time) - (819200, 3328)
+Big alloc test #30 (memory, time) - (819200, 3288)
+Big alloc test #31 (memory, time) - (819200, 3179)
+Big alloc test #32 (memory, time) - (819200, 3084)
+Big alloc test #33 (memory, time) - (819200, 3125)
+Big alloc test #34 (memory, time) - (819200, 3242)
+Big alloc test #35 (memory, time) - (819200, 3165)
+Big alloc test #36 (memory, time) - (819200, 3204)
+Big alloc test #37 (memory, time) - (819200, 3314)
+Big alloc test #38 (memory, time) - (819200, 3236)
+Big alloc test #39 (memory, time) - (819200, 3287)
+Big alloc test #40 (memory, time) - (819200, 3301)
+Big alloc test #41 (memory, time) - (819200, 3350)
+Big alloc test #42 (memory, time) - (819200, 3363)
+Big alloc test #43 (memory, time) - (819200, 3362)
+Big alloc test #44 (memory, time) - (819200, 3214)
+Big alloc test #45 (memory, time) - (819200, 3150)
+Big alloc test #46 (memory, time) - (819200, 3279)
+Big alloc test #47 (memory, time) - (819200, 3383)
+Big alloc test #48 (memory, time) - (819200, 3220)
+Big alloc test #49 (memory, time) - (819200, 3210)
+Big alloc test #50 (memory, time) - (819200, 3307)
+Big alloc test #51 (memory, time) - (819200, 3140)
+Big alloc test #52 (memory, time) - (819200, 3064)
+Big alloc test #53 (memory, time) - (819200, 3131)
+Big alloc test #54 (memory, time) - (819200, 3261)
+Big alloc test #55 (memory, time) - (819200, 3160)
+Big alloc test #56 (memory, time) - (819200, 3196)
+Big alloc test #57 (memory, time) - (819200, 3263)
+Big alloc test #58 (memory, time) - (819200, 3196)
+Big alloc test #59 (memory, time) - (819200, 3225)
+Big alloc test #60 (memory, time) - (819200, 3335)
+Big alloc test #61 (memory, time) - (819200, 3288)
+Big alloc test #62 (memory, time) - (819200, 3341)
+Big alloc test #63 (memory, time) - (819200, 3283)
+Big alloc test #64 (memory, time) - (819200, 3399)
+Big alloc test #65 (memory, time) - (819200, 3234)
+Big alloc test #66 (memory, time) - (819200, 3167)
+Big alloc test #67 (memory, time) - (819200, 3258)
+Big alloc test #68 (memory, time) - (819200, 3414)
+Big alloc test #69 (memory, time) - (819200, 3237)
+Big alloc test #70 (memory, time) - (819200, 3232)
+Big alloc test #71 (memory, time) - (819200, 3229)
+Big alloc test #72 (memory, time) - (819200, 3093)
+Big alloc test #73 (memory, time) - (819200, 3098)
+Big alloc test #74 (memory, time) - (819200, 3127)
+Big alloc test #75 (memory, time) - (819200, 3218)
+Big alloc test #76 (memory, time) - (819200, 3181)
+Big alloc test #77 (memory, time) - (819200, 3135)
+Big alloc test #78 (memory, time) - (819200, 3209)
+Big alloc test #79 (memory, time) - (819200, 3304)
+Big alloc test #80 (memory, time) - (819200, 3240)
+Big alloc test #81 (memory, time) - (819200, 3305)
+Big alloc test #82 (memory, time) - (819200, 3333)
+Big alloc test #83 (memory, time) - (819200, 3449)
+Big alloc test #84 (memory, time) - (819200, 3353)
+Big alloc test #85 (memory, time) - (819200, 3348)
+Big alloc test #86 (memory, time) - (819200, 3349)
+Big alloc test #87 (memory, time) - (819200, 3251)
+Big alloc test #88 (memory, time) - (819200, 3209)
+Big alloc test #89 (memory, time) - (819200, 3224)
+Big alloc test #90 (memory, time) - (819200, 3282)
+Big alloc test #91 (memory, time) - (819200, 3130)
+Big alloc test #92 (memory, time) - (819200, 3129)
+Big alloc test #93 (memory, time) - (819200, 3143)
+Big alloc test #94 (memory, time) - (819200, 3236)
+Big alloc test #95 (memory, time) - (819200, 3130)
+Big alloc test #96 (memory, time) - (819200, 3143)
+Big alloc test #97 (memory, time) - (819200, 3243)
+Big alloc test #98 (memory, time) - (819200, 3127)
+Big alloc test #99 (memory, time) - (819200, 3163)
+Big alloc test #100 (memory, time) - (819200, 3250)
+Allocating 250 chunks between [32 and 9999] 100 times with stragety 2 and seed 1717523
+Random alloc test #1 (memory, time) - (2048000, 10672)
+Random alloc test #2 (memory, time) - (1024000, 9955)
+Random alloc test #3 (memory, time) - (1024000, 9546)
+Random alloc test #4 (memory, time) - (2048000, 11238)
+Random alloc test #5 (memory, time) - (3072000, 10175)
+Random alloc test #6 (memory, time) - (3072000, 10038)
+Random alloc test #7 (memory, time) - (114688, 1036)
+Random alloc test #8 (memory, time) - (2048000, 10454)
+Random alloc test #9 (memory, time) - (2048000, 10880)
+Random alloc test #10 (memory, time) - (2048000, 10696)
+Random alloc test #11 (memory, time) - (1024000, 9386)
+Random alloc test #12 (memory, time) - (1024000, 9958)
+Random alloc test #13 (memory, time) - (1024000, 9372)
+Random alloc test #14 (memory, time) - (512000, 4171)
+Random alloc test #15 (memory, time) - (2048000, 10197)
+Random alloc test #16 (memory, time) - (512000, 4221)
+Random alloc test #17 (memory, time) - (1024000, 9484)
+Random alloc test #18 (memory, time) - (172032, 1604)
+Random alloc test #19 (memory, time) - (258048, 2160)
+Random alloc test #20 (memory, time) - (3072000, 10853)
+Random alloc test #21 (memory, time) - (344064, 2917)
+Random alloc test #22 (memory, time) - (1024000, 9595)
+Random alloc test #23 (memory, time) - (2048000, 10418)
+Random alloc test #24 (memory, time) - (1024000, 9073)
+Random alloc test #25 (memory, time) - (131072, 1191)
+Random alloc test #26 (memory, time) - (1024000, 9077)
+Random alloc test #27 (memory, time) - (3072000, 10436)
+Random alloc test #28 (memory, time) - (3072000, 11094)
+Random alloc test #29 (memory, time) - (2048000, 10753)
+Random alloc test #30 (memory, time) - (3072000, 10053)
+Random alloc test #31 (memory, time) - (1024000, 9127)
+Random alloc test #32 (memory, time) - (2048000, 10244)
+Random alloc test #33 (memory, time) - (2048000, 10477)
+Random alloc test #34 (memory, time) - (2048000, 11026)
+Random alloc test #35 (memory, time) - (2048000, 11149)
+Random alloc test #36 (memory, time) - (3072000, 10847)
+Random alloc test #37 (memory, time) - (2048000, 10444)
+Random alloc test #38 (memory, time) - (3072000, 10035)
+Random alloc test #39 (memory, time) - (2048000, 9935)
+Random alloc test #40 (memory, time) - (2048000, 10301)
+Random alloc test #41 (memory, time) - (2048000, 11050)
+Random alloc test #42 (memory, time) - (3072000, 11034)
+Random alloc test #43 (memory, time) - (1024000, 9913)
+Random alloc test #44 (memory, time) - (1024000, 9307)
+Random alloc test #45 (memory, time) - (3072000, 10136)
+Random alloc test #46 (memory, time) - (2048000, 9939)
+Random alloc test #47 (memory, time) - (2048000, 10197)
+Random alloc test #48 (memory, time) - (3072000, 10683)
+Random alloc test #49 (memory, time) - (1024000, 10354)
+Random alloc test #50 (memory, time) - (2048000, 10946)
+Random alloc test #51 (memory, time) - (204800, 1700)
+Random alloc test #52 (memory, time) - (1024000, 9334)
+Random alloc test #53 (memory, time) - (512000, 4146)
+Random alloc test #54 (memory, time) - (2048000, 9980)
+Random alloc test #55 (memory, time) - (69632, 602)
+Random alloc test #56 (memory, time) - (2048000, 10045)
+Random alloc test #57 (memory, time) - (1024000, 9289)
+Random alloc test #58 (memory, time) - (2048000, 11426)
+Random alloc test #59 (memory, time) - (2048000, 11588)
+Random alloc test #60 (memory, time) - (2048000, 10592)
+Random alloc test #61 (memory, time) - (2048000, 10062)
+Random alloc test #62 (memory, time) - (2048000, 7803)
+Random alloc test #63 (memory, time) - (258048, 2103)
+Random alloc test #64 (memory, time) - (2048000, 10391)
+Random alloc test #65 (memory, time) - (2048000, 10969)
+Random alloc test #66 (memory, time) - (2048000, 11546)
+Random alloc test #67 (memory, time) - (2048000, 10801)
+Random alloc test #68 (memory, time) - (2048000, 10523)
+Random alloc test #69 (memory, time) - (2048000, 10064)
+Random alloc test #70 (memory, time) - (1024000, 9370)
+Random alloc test #71 (memory, time) - (3072000, 10737)
+Random alloc test #72 (memory, time) - (2048000, 11153)
+Random alloc test #73 (memory, time) - (2048000, 10961)
+Random alloc test #74 (memory, time) - (3072000, 10480)
+Random alloc test #75 (memory, time) - (1024000, 9032)
+Random alloc test #76 (memory, time) - (512000, 4118)
+Random alloc test #77 (memory, time) - (1024000, 9053)
+Random alloc test #78 (memory, time) - (3072000, 10649)
+Random alloc test #79 (memory, time) - (2048000, 11099)
+Random alloc test #80 (memory, time) - (3072000, 11075)
+Random alloc test #81 (memory, time) - (2048000, 10683)
+Random alloc test #82 (memory, time) - (1024000, 9553)
+Random alloc test #83 (memory, time) - (3072000, 9881)
+Random alloc test #84 (memory, time) - (1024000, 9088)
+Random alloc test #85 (memory, time) - (2048000, 10368)
+Random alloc test #86 (memory, time) - (1024000, 9289)
+Random alloc test #87 (memory, time) - (102400, 1036)
+Random alloc test #88 (memory, time) - (2048000, 10905)
+Random alloc test #89 (memory, time) - (2048000, 10869)
+Random alloc test #90 (memory, time) - (2048000, 10566)
+Random alloc test #91 (memory, time) - (258048, 2122)
+Random alloc test #92 (memory, time) - (147456, 1259)
+Random alloc test #93 (memory, time) - (3072000, 10283)
+Random alloc test #94 (memory, time) - (2048000, 8058)
+Random alloc test #95 (memory, time) - (2048000, 10519)
+Random alloc test #96 (memory, time) - (45056, 469)
+Random alloc test #97 (memory, time) - (2048000, 11257)
+Random alloc test #98 (memory, time) - (258048, 2319)
+Random alloc test #99 (memory, time) - (2048000, 10665)
+Random alloc test #100 (memory, time) - (1024000, 9531)
+Allocating 52 * 10000 chunks 100 times with stragety 3
+Small alloc test #1 (memory, time) - (933888, 826681)
+Small alloc test #2 (memory, time) - (933888, 823466)
+Small alloc test #3 (memory, time) - (933888, 842157)
+Small alloc test #4 (memory, time) - (933888, 861971)
+Small alloc test #5 (memory, time) - (933888, 836188)
+Small alloc test #6 (memory, time) - (933888, 860296)
+Small alloc test #7 (memory, time) - (933888, 851197)
+Small alloc test #8 (memory, time) - (933888, 842396)
+Small alloc test #9 (memory, time) - (933888, 831817)
+Small alloc test #10 (memory, time) - (933888, 852446)
+Small alloc test #11 (memory, time) - (933888, 854027)
+Small alloc test #12 (memory, time) - (933888, 837471)
+Small alloc test #13 (memory, time) - (933888, 816892)
+Small alloc test #14 (memory, time) - (933888, 848868)
+Small alloc test #15 (memory, time) - (933888, 831947)
+Small alloc test #16 (memory, time) - (933888, 854971)
+Small alloc test #17 (memory, time) - (933888, 828195)
+Small alloc test #18 (memory, time) - (933888, 832702)
+Small alloc test #19 (memory, time) - (933888, 834325)
+Small alloc test #20 (memory, time) - (933888, 850955)
+Small alloc test #21 (memory, time) - (933888, 835988)
+Small alloc test #22 (memory, time) - (933888, 844624)
+Small alloc test #23 (memory, time) - (933888, 841703)
+Small alloc test #24 (memory, time) - (933888, 852698)
+Small alloc test #25 (memory, time) - (933888, 843789)
+Small alloc test #26 (memory, time) - (933888, 843955)
+Small alloc test #27 (memory, time) - (933888, 825417)
+Small alloc test #28 (memory, time) - (933888, 847532)
+Small alloc test #29 (memory, time) - (933888, 844899)
+Small alloc test #30 (memory, time) - (933888, 845221)
+Small alloc test #31 (memory, time) - (933888, 844191)
+Small alloc test #32 (memory, time) - (933888, 844506)
+Small alloc test #33 (memory, time) - (933888, 843690)
+Small alloc test #34 (memory, time) - (933888, 843092)
+Small alloc test #35 (memory, time) - (933888, 834446)
+Small alloc test #36 (memory, time) - (933888, 843105)
+Small alloc test #37 (memory, time) - (933888, 841142)
+Small alloc test #38 (memory, time) - (933888, 849584)
+Small alloc test #39 (memory, time) - (933888, 834796)
+Small alloc test #40 (memory, time) - (933888, 841619)
+Small alloc test #41 (memory, time) - (933888, 841747)
+Small alloc test #42 (memory, time) - (933888, 833401)
+Small alloc test #43 (memory, time) - (933888, 842396)
+Small alloc test #44 (memory, time) - (933888, 828548)
+Small alloc test #45 (memory, time) - (933888, 851553)
+Small alloc test #46 (memory, time) - (933888, 842860)
+Small alloc test #47 (memory, time) - (933888, 846749)
+Small alloc test #48 (memory, time) - (933888, 828699)
+Small alloc test #49 (memory, time) - (933888, 834316)
+Small alloc test #50 (memory, time) - (933888, 861937)
+Small alloc test #51 (memory, time) - (933888, 839682)
+Small alloc test #52 (memory, time) - (933888, 850399)
+Small alloc test #53 (memory, time) - (933888, 847224)
+Small alloc test #54 (memory, time) - (933888, 862838)
+Small alloc test #55 (memory, time) - (933888, 850334)
+Small alloc test #56 (memory, time) - (933888, 854266)
+Small alloc test #57 (memory, time) - (933888, 836284)
+Small alloc test #58 (memory, time) - (933888, 855137)
+Small alloc test #59 (memory, time) - (933888, 844650)
+Small alloc test #60 (memory, time) - (933888, 840712)
+Small alloc test #61 (memory, time) - (933888, 837033)
+Small alloc test #62 (memory, time) - (933888, 853564)
+Small alloc test #63 (memory, time) - (933888, 837473)
+Small alloc test #64 (memory, time) - (933888, 838006)
+Small alloc test #65 (memory, time) - (933888, 840358)
+Small alloc test #66 (memory, time) - (933888, 823805)
+Small alloc test #67 (memory, time) - (933888, 863004)
+Small alloc test #68 (memory, time) - (933888, 831642)
+ll alloc test #69 (memory, time) - (933888, 844198)
+Small alloc test #70 (memory, time) - (933888, 833089)
+Small alloc test #71 (memory, time) - (933888, 873495)
+Small alloc test #72 (memory, time) - (933888, 861535)
+Small alloc test #73 (memory, time) - (933888, 857751)
+Small alloc test #74 (memory, time) - (933888, 884101)
+Small alloc test #75 (memory, time) - (933888, 857649)
+Small alloc test #76 (memory, time) - (933888, 873609)
+Small alloc test #77 (memory, time) - (933888, 878077)
+Small alloc test #78 (memory, time) - (933888, 862696)
+Small alloc test #79 (memory, time) - (933888, 872185)
+Small alloc test #80 (memory, time) - (933888, 870098)
+Small alloc test #81 (memory, time) - (933888, 838968)
+Small alloc test #82 (memory, time) - (933888, 860382)
+Small alloc test #83 (memory, time) - (933888, 886884)
+Small alloc test #84 (memory, time) - (933888, 832388)
+Small alloc test #85 (memory, time) - (933888, 865480)
+Small alloc test #86 (memory, time) - (933888, 876890)
+Small alloc test #87 (memory, time) - (933888, 887979)
+Small alloc test #88 (memory, time) - (933888, 840311)
+Small alloc test #89 (memory, time) - (933888, 835352)
+Small alloc test #90 (memory, time) - (933888, 897160)
+Small alloc test #91 (memory, time) - (933888, 860339)
+Small alloc test #92 (memory, time) - (933888, 864635)
+Small alloc test #93 (memory, time) - (933888, 869783)
+Small alloc test #94 (memory, time) - (933888, 867349)
+Small alloc test #95 (memory, time) - (933888, 853712)
+Small alloc test #96 (memory, time) - (933888, 895466)
+Small alloc test #97 (memory, time) - (933888, 856278)
+Small alloc test #98 (memory, time) - (933888, 855136)
+Small alloc test #99 (memory, time) - (933888, 866612)
+Small alloc test #100 (memory, time) - (933888, 852925)
+Allocating 7894 * 100 chunks 100 times with stragety 3
+Big alloc test #1 (memory, time) - (819200, 3644)
+Big alloc test #2 (memory, time) - (819200, 3720)
+Big alloc test #3 (memory, time) - (819200, 3666)
+Big alloc test #4 (memory, time) - (819200, 3503)
+Big alloc test #5 (memory, time) - (819200, 3603)
+Big alloc test #6 (memory, time) - (819200, 3366)
+Big alloc test #7 (memory, time) - (819200, 3381)
+Big alloc test #8 (memory, time) - (819200, 3706)
+Big alloc test #9 (memory, time) - (819200, 3378)
+Big alloc test #10 (memory, time) - (819200, 3512)
+Big alloc test #11 (memory, time) - (819200, 3899)
+Big alloc test #12 (memory, time) - (819200, 3478)
+Big alloc test #13 (memory, time) - (819200, 3932)
+Big alloc test #14 (memory, time) - (819200, 3695)
+Big alloc test #15 (memory, time) - (819200, 3602)
+Big alloc test #16 (memory, time) - (819200, 3573)
+Big alloc test #17 (memory, time) - (819200, 3496)
+Big alloc test #18 (memory, time) - (819200, 3560)
+Big alloc test #19 (memory, time) - (819200, 3440)
+Big alloc test #20 (memory, time) - (819200, 3557)
+Big alloc test #21 (memory, time) - (819200, 3356)
+Big alloc test #22 (memory, time) - (819200, 3634)
+Big alloc test #23 (memory, time) - (819200, 3345)
+Big alloc test #24 (memory, time) - (819200, 3355)
+Big alloc test #25 (memory, time) - (819200, 3660)
+Big alloc test #26 (memory, time) - (819200, 3815)
+Big alloc test #27 (memory, time) - (819200, 3758)
+Big alloc test #28 (memory, time) - (819200, 3496)
+Big alloc test #29 (memory, time) - (819200, 3831)
+Big alloc test #30 (memory, time) - (819200, 3834)
+Big alloc test #31 (memory, time) - (819200, 3635)
+Big alloc test #32 (memory, time) - (819200, 3635)
+Big alloc test #33 (memory, time) - (819200, 3760)
+Big alloc test #34 (memory, time) - (819200, 3667)
+Big alloc test #35 (memory, time) - (819200, 3522)
+Big alloc test #36 (memory, time) - (819200, 3615)
+Big alloc test #37 (memory, time) - (819200, 3436)
+Big alloc test #38 (memory, time) - (819200, 3476)
+Big alloc test #39 (memory, time) - (819200, 3280)
+Big alloc test #40 (memory, time) - (819200, 3543)
+Big alloc test #41 (memory, time) - (819200, 3365)
+Big alloc test #42 (memory, time) - (819200, 3331)
+Big alloc test #43 (memory, time) - (819200, 3657)
+Big alloc test #44 (memory, time) - (819200, 3511)
+Big alloc test #45 (memory, time) - (819200, 3994)
+Big alloc test #46 (memory, time) - (819200, 3524)
+Big alloc test #47 (memory, time) - (819200, 3542)
+Big alloc test #48 (memory, time) - (819200, 3865)
+Big alloc test #49 (memory, time) - (819200, 3732)
+Big alloc test #50 (memory, time) - (819200, 3458)
+Big alloc test #51 (memory, time) - (819200, 3589)
+Big alloc test #52 (memory, time) - (819200, 3659)
+Big alloc test #53 (memory, time) - (819200, 3460)
+Big alloc test #54 (memory, time) - (819200, 3413)
+Big alloc test #55 (memory, time) - (819200, 3356)
+Big alloc test #56 (memory, time) - (819200, 3450)
+Big alloc test #57 (memory, time) - (819200, 3312)
+Big alloc test #58 (memory, time) - (819200, 3499)
+Big alloc test #59 (memory, time) - (819200, 3308)
+Big alloc test #60 (memory, time) - (819200, 3511)
+Big alloc test #61 (memory, time) - (819200, 3822)
+Big alloc test #62 (memory, time) - (819200, 3438)
+Big alloc test #63 (memory, time) - (819200, 3950)
+Big alloc test #64 (memory, time) - (819200, 3752)
+Big alloc test #65 (memory, time) - (819200, 3588)
+Big alloc test #66 (memory, time) - (819200, 3611)
+Big alloc test #67 (memory, time) - (819200, 3790)
+Big alloc test #68 (memory, time) - (819200, 3585)
+Big alloc test #69 (memory, time) - (819200, 3577)
+Big alloc test #70 (memory, time) - (819200, 3293)
+Big alloc test #71 (memory, time) - (819200, 3622)
+Big alloc test #72 (memory, time) - (819200, 3292)
+Big alloc test #73 (memory, time) - (819200, 3639)
+Big alloc test #74 (memory, time) - (819200, 3267)
+Big alloc test #75 (memory, time) - (819200, 3529)
+Big alloc test #76 (memory, time) - (819200, 3283)
+Big alloc test #77 (memory, time) - (819200, 3360)
+Big alloc test #78 (memory, time) - (819200, 3365)
+Big alloc test #79 (memory, time) - (819200, 3428)
+Big alloc test #80 (memory, time) - (819200, 3489)
+Big alloc test #81 (memory, time) - (819200, 3448)
+Big alloc test #82 (memory, time) - (819200, 3685)
+Big alloc test #83 (memory, time) - (819200, 3584)
+Big alloc test #84 (memory, time) - (819200, 3857)
+Big alloc test #85 (memory, time) - (819200, 3474)
+Big alloc test #86 (memory, time) - (819200, 3679)
+Big alloc test #87 (memory, time) - (819200, 3666)
+Big alloc test #88 (memory, time) - (819200, 3573)
+Big alloc test #89 (memory, time) - (819200, 3438)
+Big alloc test #90 (memory, time) - (819200, 3605)
+Big alloc test #91 (memory, time) - (819200, 3318)
+Big alloc test #92 (memory, time) - (819200, 3248)
+Big alloc test #93 (memory, time) - (819200, 3290)
+Big alloc test #94 (memory, time) - (819200, 3656)
+Big alloc test #95 (memory, time) - (819200, 3680)
+Big alloc test #96 (memory, time) - (819200, 3772)
+Big alloc test #97 (memory, time) - (819200, 3522)
+Big alloc test #98 (memory, time) - (819200, 3710)
+Big alloc test #99 (memory, time) - (819200, 3718)
+Big alloc test #100 (memory, time) - (819200, 3630)
+Allocating 250 chunks between [32 and 9999] 100 times with stragety 3 and seed 1717523
+Random alloc test #1 (memory, time) - (2048000, 10830)
+Random alloc test #2 (memory, time) - (1024000, 10012)
+Random alloc test #3 (memory, time) - (1024000, 9684)
+Random alloc test #4 (memory, time) - (2048000, 11853)
+Random alloc test #5 (memory, time) - (3072000, 11155)
+Random alloc test #6 (memory, time) - (3072000, 11342)
+Random alloc test #7 (memory, time) - (114688, 1296)
+Random alloc test #8 (memory, time) - (2048000, 11639)
+Random alloc test #9 (memory, time) - (2048000, 10518)
+Random alloc test #10 (memory, time) - (2048000, 11125)
+Random alloc test #11 (memory, time) - (1024000, 9875)
+Random alloc test #12 (memory, time) - (1024000, 10616)
+Random alloc test #13 (memory, time) - (1024000, 9873)
+Random alloc test #14 (memory, time) - (512000, 4465)
+Random alloc test #15 (memory, time) - (2048000, 10550)
+Random alloc test #16 (memory, time) - (512000, 4152)
+Random alloc test #17 (memory, time) - (1024000, 10324)
+Random alloc test #18 (memory, time) - (172032, 1879)
+Random alloc test #19 (memory, time) - (258048, 2239)
+Random alloc test #20 (memory, time) - (3072000, 10969)
+Random alloc test #21 (memory, time) - (344064, 2951)
+Random alloc test #22 (memory, time) - (1024000, 9837)
+Random alloc test #23 (memory, time) - (2048000, 11295)
+Random alloc test #24 (memory, time) - (1024000, 10021)
+Random alloc test #25 (memory, time) - (131072, 1266)
+Random alloc test #26 (memory, time) - (1024000, 9769)
+Random alloc test #27 (memory, time) - (3072000, 11088)
+Random alloc test #28 (memory, time) - (3072000, 10725)
+Random alloc test #29 (memory, time) - (2048000, 11621)
+Random alloc test #30 (memory, time) - (3072000, 10493)
+Random alloc test #31 (memory, time) - (1024000, 9583)
+Random alloc test #32 (memory, time) - (2048000, 10280)
+Random alloc test #33 (memory, time) - (2048000, 10400)
+Random alloc test #34 (memory, time) - (2048000, 10743)
+Random alloc test #35 (memory, time) - (2048000, 11037)
+Random alloc test #36 (memory, time) - (3072000, 10627)
+Random alloc test #37 (memory, time) - (2048000, 10613)
+Random alloc test #38 (memory, time) - (3072000, 10624)
+Random alloc test #39 (memory, time) - (2048000, 10084)
+Random alloc test #40 (memory, time) - (2048000, 10072)
+Random alloc test #41 (memory, time) - (2048000, 10942)
+Random alloc test #42 (memory, time) - (3072000, 10803)
+Random alloc test #43 (memory, time) - (1024000, 10010)
+Random alloc test #44 (memory, time) - (1024000, 9988)
+Random alloc test #45 (memory, time) - (3072000, 10397)
+Random alloc test #46 (memory, time) - (2048000, 9997)
+Random alloc test #47 (memory, time) - (2048000, 10167)
+Random alloc test #48 (memory, time) - (3072000, 11043)
+Random alloc test #49 (memory, time) - (1024000, 10186)
+Random alloc test #50 (memory, time) - (2048000, 10694)
+Random alloc test #51 (memory, time) - (204800, 1767)
+Random alloc test #52 (memory, time) - (1024000, 9588)
+Random alloc test #53 (memory, time) - (512000, 4064)
+Random alloc test #54 (memory, time) - (2048000, 9959)
+Random alloc test #55 (memory, time) - (69632, 607)
+Random alloc test #56 (memory, time) - (2048000, 10602)
+Random alloc test #57 (memory, time) - (1024000, 9492)
+Random alloc test #58 (memory, time) - (2048000, 10436)
+Random alloc test #59 (memory, time) - (2048000, 10942)
+Random alloc test #60 (memory, time) - (2048000, 10922)
+Random alloc test #61 (memory, time) - (2048000, 10406)
+Random alloc test #62 (memory, time) - (2048000, 8036)
+Random alloc test #63 (memory, time) - (258048, 2184)
+Random alloc test #64 (memory, time) - (2048000, 10646)
+Random alloc test #65 (memory, time) - (2048000, 10420)
+Random alloc test #66 (memory, time) - (2048000, 10615)
+Random alloc test #67 (memory, time) - (2048000, 11829)
+Random alloc test #68 (memory, time) - (2048000, 10796)
+Random alloc test #69 (memory, time) - (2048000, 10528)
+Random alloc test #70 (memory, time) - (1024000, 9445)
+Random alloc test #71 (memory, time) - (3072000, 10081)
+Random alloc test #72 (memory, time) - (2048000, 10395)
+Random alloc test #73 (memory, time) - (2048000, 11480)
+Random alloc test #74 (memory, time) - (3072000, 10709)
+Random alloc test #75 (memory, time) - (1024000, 9757)
+Random alloc test #76 (memory, time) - (512000, 4484)
+Random alloc test #77 (memory, time) - (1024000, 9208)
+Random alloc test #78 (memory, time) - (3072000, 10668)
+Random alloc test #79 (memory, time) - (2048000, 11372)
+Random alloc test #80 (memory, time) - (3072000, 10349)
+Random alloc test #81 (memory, time) - (2048000, 10767)
+Random alloc test #82 (memory, time) - (1024000, 10131)
+Random alloc test #83 (memory, time) - (3072000, 10531)
+Random alloc test #84 (memory, time) - (1024000, 9062)
+Random alloc test #85 (memory, time) - (2048000, 10463)
+Random alloc test #86 (memory, time) - (1024000, 9077)
+Random alloc test #87 (memory, time) - (102400, 926)
+Random alloc test #88 (memory, time) - (2048000, 10299)
+Random alloc test #89 (memory, time) - (2048000, 11306)
+Random alloc test #90 (memory, time) - (2048000, 11243)
+Random alloc test #91 (memory, time) - (258048, 2374)
+Random alloc test #92 (memory, time) - (147456, 1334)
+Random alloc test #93 (memory, time) - (3072000, 10753)
+Random alloc test #94 (memory, time) - (2048000, 8144)
+Random alloc test #95 (memory, time) - (2048000, 9985)
+Random alloc test #96 (memory, time) - (45056, 437)
+Random alloc test #97 (memory, time) - (2048000, 10722)
+Random alloc test #98 (memory, time) - (258048, 2348)
+Random alloc test #99 (memory, time) - (2048000, 10547)
+Random alloc test #100 (memory, time) - (1024000, 9662)
+Allocating 52 * 10000 chunks 100 times with stragety 4
+Small alloc test #1 (memory, time) - (1081344, 8592)
+Small alloc test #2 (memory, time) - (1081344, 8559)
+Small alloc test #3 (memory, time) - (1081344, 8532)
+Small alloc test #4 (memory, time) - (1081344, 8437)
+Small alloc test #5 (memory, time) - (1081344, 9159)
+Small alloc test #6 (memory, time) - (1081344, 8971)
+Small alloc test #7 (memory, time) - (1081344, 9342)
+Small alloc test #8 (memory, time) - (1081344, 8924)
+Small alloc test #9 (memory, time) - (1081344, 8751)
+Small alloc test #10 (memory, time) - (1081344, 8510)
+Small alloc test #11 (memory, time) - (1081344, 8480)
+Small alloc test #12 (memory, time) - (1081344, 8397)
+Small alloc test #13 (memory, time) - (1081344, 8834)
+Small alloc test #14 (memory, time) - (1081344, 9008)
+Small alloc test #15 (memory, time) - (1081344, 9535)
+Small alloc test #16 (memory, time) - (1081344, 8846)
+Small alloc test #17 (memory, time) - (1081344, 8732)
+Small alloc test #18 (memory, time) - (1081344, 8718)
+Small alloc test #19 (memory, time) - (1081344, 8606)
+Small alloc test #20 (memory, time) - (1081344, 8639)
+Small alloc test #21 (memory, time) - (1081344, 9036)
+Small alloc test #22 (memory, time) - (1081344, 9076)
+Small alloc test #23 (memory, time) - (1081344, 9013)
+Small alloc test #24 (memory, time) - (1081344, 8793)
+Small alloc test #25 (memory, time) - (1081344, 8718)
+Small alloc test #26 (memory, time) - (1081344, 8540)
+Small alloc test #27 (memory, time) - (1081344, 8522)
+Small alloc test #28 (memory, time) - (1081344, 8551)
+Small alloc test #29 (memory, time) - (1081344, 9106)
+Small alloc test #30 (memory, time) - (1081344, 9408)
+Small alloc test #31 (memory, time) - (1081344, 8986)
+Small alloc test #32 (memory, time) - (1081344, 8589)
+Small alloc test #33 (memory, time) - (1081344, 8683)
+Small alloc test #34 (memory, time) - (1081344, 8453)
+Small alloc test #35 (memory, time) - (1081344, 8531)
+Small alloc test #36 (memory, time) - (1081344, 8668)
+Small alloc test #37 (memory, time) - (1081344, 9195)
+Small alloc test #38 (memory, time) - (1081344, 9024)
+Small alloc test #39 (memory, time) - (1081344, 8964)
+Small alloc test #40 (memory, time) - (1081344, 8677)
+Small alloc test #41 (memory, time) - (1081344, 8683)
+Small alloc test #42 (memory, time) - (1081344, 8532)
+Small alloc test #43 (memory, time) - (1081344, 8458)
+Small alloc test #44 (memory, time) - (1081344, 8880)
+Small alloc test #45 (memory, time) - (1081344, 9348)
+Small alloc test #46 (memory, time) - (1081344, 8962)
+Small alloc test #47 (memory, time) - (1081344, 8917)
+Small alloc test #48 (memory, time) - (1081344, 8570)
+Small alloc test #49 (memory, time) - (1081344, 8550)
+Small alloc test #50 (memory, time) - (1081344, 8629)
+Small alloc test #51 (memory, time) - (1081344, 8637)
+Small alloc test #52 (memory, time) - (1081344, 8702)
+Small alloc test #53 (memory, time) - (1081344, 9378)
+Small alloc test #54 (memory, time) - (1081344, 8938)
+Small alloc test #55 (memory, time) - (1081344, 8930)
+Small alloc test #56 (memory, time) - (1081344, 8623)
+Small alloc test #57 (memory, time) - (1081344, 8795)
+Small alloc test #58 (memory, time) - (1081344, 8695)
+Small alloc test #59 (memory, time) - (1081344, 8533)
+Small alloc test #60 (memory, time) - (1081344, 9013)
+Small alloc test #61 (memory, time) - (1081344, 9325)
+Small alloc test #62 (memory, time) - (1081344, 8776)
+Small alloc test #63 (memory, time) - (1081344, 9293)
+Small alloc test #64 (memory, time) - (1081344, 8462)
+Small alloc test #65 (memory, time) - (1081344, 8538)
+Small alloc test #66 (memory, time) - (1081344, 8568)
+Small alloc test #67 (memory, time) - (1081344, 8760)
+Small alloc test #68 (memory, time) - (1081344, 9105)
+Small alloc test #69 (memory, time) - (1081344, 9123)
+Small alloc test #70 (memory, time) - (1081344, 8682)
+Small alloc test #71 (memory, time) - (1081344, 8894)
+Small alloc test #72 (memory, time) - (1081344, 8512)
+Small alloc test #73 (memory, time) - (1081344, 8477)
+Small alloc test #74 (memory, time) - (1081344, 8616)
+Small alloc test #75 (memory, time) - (1081344, 8864)
+Small alloc test #76 (memory, time) - (1081344, 9053)
+Small alloc test #77 (memory, time) - (1081344, 9027)
+Small alloc test #78 (memory, time) - (1081344, 9142)
+Small alloc test #79 (memory, time) - (1081344, 8580)
+Small alloc test #80 (memory, time) - (1081344, 8692)
+Small alloc test #81 (memory, time) - (1081344, 8832)
+Small alloc test #82 (memory, time) - (1081344, 8841)
+Small alloc test #83 (memory, time) - (1081344, 9040)
+Small alloc test #84 (memory, time) - (1081344, 8996)
+Small alloc test #85 (memory, time) - (1081344, 8783)
+Small alloc test #86 (memory, time) - (1081344, 9067)
+Small alloc test #87 (memory, time) - (1081344, 8563)
+Small alloc test #88 (memory, time) - (1081344, 8720)
+Small alloc test #89 (memory, time) - (1081344, 8859)
+Small alloc test #90 (memory, time) - (1081344, 8562)
+Small alloc test #91 (memory, time) - (1081344, 8818)
+Small alloc test #92 (memory, time) - (1081344, 9110)
+Small alloc test #93 (memory, time) - (1081344, 8849)
+Small alloc test #94 (memory, time) - (1081344, 8500)
+Small alloc test #95 (memory, time) - (1081344, 9082)
+Small alloc test #96 (memory, time) - (1081344, 8564)
+Small alloc test #97 (memory, time) - (1081344, 8872)
+Small alloc test #98 (memory, time) - (1081344, 8867)
+Small alloc test #99 (memory, time) - (1081344, 9254)
+Small alloc test #100 (memory, time) - (1081344, 9251)
+Allocating 7894 * 100 chunks 100 times with stragety 4
+Big alloc test #1 (memory, time) - (819200, 3338)
+Big alloc test #2 (memory, time) - (819200, 3719)
+Big alloc test #3 (memory, time) - (819200, 3249)
+Big alloc test #4 (memory, time) - (819200, 3435)
+Big alloc test #5 (memory, time) - (819200, 3274)
+Big alloc test #6 (memory, time) - (819200, 3161)
+Big alloc test #7 (memory, time) - (819200, 3513)
+Big alloc test #8 (memory, time) - (819200, 3681)
+Big alloc test #9 (memory, time) - (819200, 3397)
+Big alloc test #10 (memory, time) - (819200, 3497)
+Big alloc test #11 (memory, time) - (819200, 3513)
+Big alloc test #12 (memory, time) - (819200, 3633)
+Big alloc test #13 (memory, time) - (819200, 4052)
+Big alloc test #14 (memory, time) - (819200, 4622)
+Big alloc test #15 (memory, time) - (819200, 4332)
+Big alloc test #16 (memory, time) - (819200, 4001)
+Big alloc test #17 (memory, time) - (819200, 4322)
+Big alloc test #18 (memory, time) - (819200, 4386)
+Big alloc test #19 (memory, time) - (819200, 4049)
+Big alloc test #20 (memory, time) - (819200, 4539)
+Big alloc test #21 (memory, time) - (819200, 4170)
+Big alloc test #22 (memory, time) - (819200, 3592)
+Big alloc test #23 (memory, time) - (819200, 3558)
+Big alloc test #24 (memory, time) - (819200, 3611)
+Big alloc test #25 (memory, time) - (819200, 3297)
+Big alloc test #26 (memory, time) - (819200, 3504)
+Big alloc test #27 (memory, time) - (819200, 3362)
+Big alloc test #28 (memory, time) - (819200, 3322)
+Big alloc test #29 (memory, time) - (819200, 3843)
+Big alloc test #30 (memory, time) - (819200, 3866)
+Big alloc test #31 (memory, time) - (819200, 3655)
+Big alloc test #32 (memory, time) - (819200, 3227)
+Big alloc test #33 (memory, time) - (819200, 3129)
+Big alloc test #34 (memory, time) - (819200, 3572)
+Big alloc test #35 (memory, time) - (819200, 3141)
+Big alloc test #36 (memory, time) - (819200, 3690)
+Big alloc test #37 (memory, time) - (819200, 3335)
+Big alloc test #38 (memory, time) - (819200, 3657)
+Big alloc test #39 (memory, time) - (819200, 3400)
+Big alloc test #40 (memory, time) - (819200, 3650)
+Big alloc test #41 (memory, time) - (819200, 3381)
+Big alloc test #42 (memory, time) - (819200, 3376)
+Big alloc test #43 (memory, time) - (819200, 3189)
+Big alloc test #44 (memory, time) - (819200, 3679)
+Big alloc test #45 (memory, time) - (819200, 3331)
+Big alloc test #46 (memory, time) - (819200, 3308)
+Big alloc test #47 (memory, time) - (819200, 3870)
+Big alloc test #48 (memory, time) - (819200, 3817)
+Big alloc test #49 (memory, time) - (819200, 3169)
+Big alloc test #50 (memory, time) - (819200, 3136)
+Big alloc test #51 (memory, time) - (819200, 3135)
+Big alloc test #52 (memory, time) - (819200, 3136)
+Big alloc test #53 (memory, time) - (819200, 3158)
+Big alloc test #54 (memory, time) - (819200, 3246)
+Big alloc test #55 (memory, time) - (819200, 3218)
+Big alloc test #56 (memory, time) - (819200, 3197)
+Big alloc test #57 (memory, time) - (819200, 3539)
+Big alloc test #58 (memory, time) - (819200, 3401)
+Big alloc test #59 (memory, time) - (819200, 3464)
+Big alloc test #60 (memory, time) - (819200, 3388)
+Big alloc test #61 (memory, time) - (819200, 3228)
+Big alloc test #62 (memory, time) - (819200, 3191)
+Big alloc test #63 (memory, time) - (819200, 3189)
+Big alloc test #64 (memory, time) - (819200, 3276)
+Big alloc test #65 (memory, time) - (819200, 3279)
+Big alloc test #66 (memory, time) - (819200, 3369)
+Big alloc test #67 (memory, time) - (819200, 3285)
+Big alloc test #68 (memory, time) - (819200, 3729)
+Big alloc test #69 (memory, time) - (819200, 3120)
+Big alloc test #70 (memory, time) - (819200, 3116)
+Big alloc test #71 (memory, time) - (819200, 3156)
+Big alloc test #72 (memory, time) - (819200, 3138)
+Big alloc test #73 (memory, time) - (819200, 3245)
+Big alloc test #74 (memory, time) - (819200, 3585)
+Big alloc test #75 (memory, time) - (819200, 3330)
+Big alloc test #76 (memory, time) - (819200, 3347)
+Big alloc test #77 (memory, time) - (819200, 3320)
+Big alloc test #78 (memory, time) - (819200, 3422)
+Big alloc test #79 (memory, time) - (819200, 3386)
+Big alloc test #80 (memory, time) - (819200, 3197)
+Big alloc test #81 (memory, time) - (819200, 3175)
+Big alloc test #82 (memory, time) - (819200, 3214)
+Big alloc test #83 (memory, time) - (819200, 3284)
+Big alloc test #84 (memory, time) - (819200, 3310)
+Big alloc test #85 (memory, time) - (819200, 3269)
+Big alloc test #86 (memory, time) - (819200, 3209)
+Big alloc test #87 (memory, time) - (819200, 3197)
+Big alloc test #88 (memory, time) - (819200, 3157)
+Big alloc test #89 (memory, time) - (819200, 3099)
+Big alloc test #90 (memory, time) - (819200, 3553)
+Big alloc test #91 (memory, time) - (819200, 3200)
+Big alloc test #92 (memory, time) - (819200, 3290)
+Big alloc test #93 (memory, time) - (819200, 3320)
+Big alloc test #94 (memory, time) - (819200, 3299)
+Big alloc test #95 (memory, time) - (819200, 3359)
+Big alloc test #96 (memory, time) - (819200, 3382)
+Big alloc test #97 (memory, time) - (819200, 3378)
+Big alloc test #98 (memory, time) - (819200, 3202)
+Big alloc test #99 (memory, time) - (819200, 3189)
+Big alloc test #100 (memory, time) - (819200, 3254)
+Allocating 250 chunks between [32 and 9999] 100 times with stragety 4 and seed 1717523
+Random alloc test #1 (memory, time) - (2048000, 10827)
+Random alloc test #2 (memory, time) - (1024000, 9669)
+Random alloc test #3 (memory, time) - (1024000, 9165)
+Random alloc test #4 (memory, time) - (2048000, 11118)
+Random alloc test #5 (memory, time) - (3072000, 11082)
+Random alloc test #6 (memory, time) - (3072000, 10441)
+Random alloc test #7 (memory, time) - (114688, 1067)
+Random alloc test #8 (memory, time) - (2048000, 10844)
+Random alloc test #9 (memory, time) - (2048000, 10401)
+Random alloc test #10 (memory, time) - (2048000, 10446)
+Random alloc test #11 (memory, time) - (1024000, 9432)
+Random alloc test #12 (memory, time) - (1024000, 10509)
+Random alloc test #13 (memory, time) - (1024000, 9721)
+Random alloc test #14 (memory, time) - (512000, 4229)
+Random alloc test #15 (memory, time) - (2048000, 10172)
+Random alloc test #16 (memory, time) - (512000, 4112)
+Random alloc test #17 (memory, time) - (1024000, 9684)
+Random alloc test #18 (memory, time) - (172032, 1543)
+Random alloc test #19 (memory, time) - (258048, 2086)
+Random alloc test #20 (memory, time) - (3072000, 10423)
+Random alloc test #21 (memory, time) - (344064, 2869)
+Random alloc test #22 (memory, time) - (1024000, 9780)
+Random alloc test #23 (memory, time) - (2048000, 10619)
+Random alloc test #24 (memory, time) - (1024000, 9665)
+Random alloc test #25 (memory, time) - (131072, 1299)
+Random alloc test #26 (memory, time) - (1024000, 9570)
+Random alloc test #27 (memory, time) - (3072000, 10161)
+Random alloc test #28 (memory, time) - (3072000, 10727)
+Random alloc test #29 (memory, time) - (2048000, 10357)
+Random alloc test #30 (memory, time) - (3072000, 10761)
+Random alloc test #31 (memory, time) - (1024000, 9504)
+Random alloc test #32 (memory, time) - (2048000, 10636)
+Random alloc test #33 (memory, time) - (2048000, 10870)
+Random alloc test #34 (memory, time) - (2048000, 10387)
+Random alloc test #35 (memory, time) - (2048000, 10360)
+Random alloc test #36 (memory, time) - (3072000, 10579)
+Random alloc test #37 (memory, time) - (2048000, 11038)
+Random alloc test #38 (memory, time) - (3072000, 10101)
+Random alloc test #39 (memory, time) - (2048000, 10719)
+Random alloc test #40 (memory, time) - (2048000, 10196)
+Random alloc test #41 (memory, time) - (2048000, 10879)
+Random alloc test #42 (memory, time) - (3072000, 10499)
+Random alloc test #43 (memory, time) - (1024000, 10054)
+Random alloc test #44 (memory, time) - (1024000, 9375)
+Random alloc test #45 (memory, time) - (3072000, 10713)
+Random alloc test #46 (memory, time) - (2048000, 10417)
+Random alloc test #47 (memory, time) - (2048000, 11316)
+Random alloc test #48 (memory, time) - (3072000, 10749)
+Random alloc test #49 (memory, time) - (1024000, 10606)
+Random alloc test #50 (memory, time) - (2048000, 10437)
+Random alloc test #51 (memory, time) - (204800, 1660)
+Random alloc test #52 (memory, time) - (1024000, 9426)
+Random alloc test #53 (memory, time) - (512000, 4427)
+Random alloc test #54 (memory, time) - (2048000, 10407)
+Random alloc test #55 (memory, time) - (69632, 612)
+Random alloc test #56 (memory, time) - (2048000, 10485)
+Random alloc test #57 (memory, time) - (1024000, 9482)
+Random alloc test #58 (memory, time) - (2048000, 10636)
+Random alloc test #59 (memory, time) - (2048000, 11026)
+Random alloc test #60 (memory, time) - (2048000, 10688)
+Random alloc test #61 (memory, time) - (2048000, 10432)
+Random alloc test #62 (memory, time) - (2048000, 8152)
+Random alloc test #63 (memory, time) - (258048, 2197)
+Random alloc test #64 (memory, time) - (2048000, 10753)
+Random alloc test #65 (memory, time) - (2048000, 10928)
+Random alloc test #66 (memory, time) - (2048000, 10677)
+Random alloc test #67 (memory, time) - (2048000, 10403)
+Random alloc test #68 (memory, time) - (2048000, 10639)
+Random alloc test #69 (memory, time) - (2048000, 10143)
+Random alloc test #70 (memory, time) - (1024000, 9826)
+Random alloc test #71 (memory, time) - (3072000, 10846)
+Random alloc test #72 (memory, time) - (2048000, 10400)
+Random alloc test #73 (memory, time) - (2048000, 10836)
+Random alloc test #74 (memory, time) - (3072000, 10433)
+Random alloc test #75 (memory, time) - (1024000, 9182)
+Random alloc test #76 (memory, time) - (512000, 4283)
+Random alloc test #77 (memory, time) - (1024000, 9506)
+Random alloc test #78 (memory, time) - (3072000, 11225)
+Random alloc test #79 (memory, time) - (2048000, 11040)
+Random alloc test #80 (memory, time) - (3072000, 10598)
+Random alloc test #81 (memory, time) - (2048000, 10518)
+Random alloc test #82 (memory, time) - (1024000, 9706)
+Random alloc test #83 (memory, time) - (3072000, 10217)
+Random alloc test #84 (memory, time) - (1024000, 9808)
+Random alloc test #85 (memory, time) - (2048000, 10581)
+Random alloc test #86 (memory, time) - (1024000, 9236)
+Random alloc test #87 (memory, time) - (102400, 930)
+Random alloc test #88 (memory, time) - (2048000, 10562)
+Random alloc test #89 (memory, time) - (2048000, 11670)
+Random alloc test #90 (memory, time) - (2048000, 10631)
+Random alloc test #91 (memory, time) - (258048, 2179)
+Random alloc test #92 (memory, time) - (147456, 1341)
+Random alloc test #93 (memory, time) - (3072000, 11039)
+Random alloc test #94 (memory, time) - (2048000, 8013)
+Random alloc test #95 (memory, time) - (2048000, 10335)
+Random alloc test #96 (memory, time) - (45056, 447)
+Random alloc test #97 (memory, time) - (2048000, 10566)
+Random alloc test #98 (memory, time) - (258048, 2268)
+Random alloc test #99 (memory, time) - (2048000, 10511)
+Random alloc test #100 (memory, time) - (1024000, 9629)
+
+
+
+Resultat av test #2:
+
+
+
+
+
+Allocating 19 * 100 chunks 100 times with stragety 1
+Small alloc test #1 (memory, time) - (8192, 354)
+Small alloc test #2 (memory, time) - (8192, 102)
+Small alloc test #3 (memory, time) - (8192, 283)
+Small alloc test #4 (memory, time) - (8192, 98)
+Small alloc test #5 (memory, time) - (8192, 136)
+Small alloc test #6 (memory, time) - (8192, 87)
+Small alloc test #7 (memory, time) - (8192, 90)
+Small alloc test #8 (memory, time) - (8192, 113)
+Small alloc test #9 (memory, time) - (8192, 92)
+Small alloc test #10 (memory, time) - (8192, 90)
+Small alloc test #11 (memory, time) - (8192, 251)
+Small alloc test #12 (memory, time) - (8192, 86)
+Small alloc test #13 (memory, time) - (8192, 112)
+Small alloc test #14 (memory, time) - (8192, 94)
+Small alloc test #15 (memory, time) - (8192, 91)
+Small alloc test #16 (memory, time) - (8192, 90)
+Small alloc test #17 (memory, time) - (8192, 124)
+Small alloc test #18 (memory, time) - (8192, 85)
+Small alloc test #19 (memory, time) - (8192, 85)
+Small alloc test #20 (memory, time) - (8192, 110)
+Small alloc test #21 (memory, time) - (8192, 92)
+Small alloc test #22 (memory, time) - (8192, 104)
+Small alloc test #23 (memory, time) - (8192, 119)
+Small alloc test #24 (memory, time) - (8192, 85)
+Small alloc test #25 (memory, time) - (8192, 105)
+Small alloc test #26 (memory, time) - (8192, 111)
+Small alloc test #27 (memory, time) - (8192, 93)
+Small alloc test #28 (memory, time) - (8192, 91)
+Small alloc test #29 (memory, time) - (8192, 121)
+Small alloc test #30 (memory, time) - (8192, 88)
+Small alloc test #31 (memory, time) - (8192, 93)
+Small alloc test #32 (memory, time) - (8192, 110)
+Small alloc test #33 (memory, time) - (8192, 98)
+Small alloc test #34 (memory, time) - (8192, 90)
+Small alloc test #35 (memory, time) - (8192, 215)
+Small alloc test #36 (memory, time) - (8192, 88)
+Small alloc test #37 (memory, time) - (8192, 85)
+Small alloc test #38 (memory, time) - (8192, 115)
+Small alloc test #39 (memory, time) - (8192, 94)
+Small alloc test #40 (memory, time) - (8192, 92)
+Small alloc test #41 (memory, time) - (8192, 168)
+Small alloc test #42 (memory, time) - (8192, 90)
+Small alloc test #43 (memory, time) - (8192, 86)
+Small alloc test #44 (memory, time) - (8192, 120)
+Small alloc test #45 (memory, time) - (8192, 94)
+Small alloc test #46 (memory, time) - (8192, 91)
+Small alloc test #47 (memory, time) - (8192, 130)
+Small alloc test #48 (memory, time) - (8192, 89)
+Small alloc test #49 (memory, time) - (8192, 88)
+Small alloc test #50 (memory, time) - (8192, 88)
+Small alloc test #51 (memory, time) - (8192, 85)
+Small alloc test #52 (memory, time) - (8192, 88)
+Small alloc test #53 (memory, time) - (8192, 142)
+Small alloc test #54 (memory, time) - (8192, 94)
+Small alloc test #55 (memory, time) - (8192, 119)
+Small alloc test #56 (memory, time) - (8192, 291)
+Small alloc test #57 (memory, time) - (8192, 93)
+Small alloc test #58 (memory, time) - (8192, 117)
+Small alloc test #59 (memory, time) - (8192, 94)
+Small alloc test #60 (memory, time) - (8192, 95)
+Small alloc test #61 (memory, time) - (8192, 291)
+Small alloc test #62 (memory, time) - (8192, 90)
+Small alloc test #63 (memory, time) - (8192, 136)
+Small alloc test #64 (memory, time) - (8192, 93)
+Small alloc test #65 (memory, time) - (8192, 102)
+Small alloc test #66 (memory, time) - (8192, 270)
+Small alloc test #67 (memory, time) - (8192, 89)
+Small alloc test #68 (memory, time) - (8192, 139)
+Small alloc test #69 (memory, time) - (8192, 100)
+Small alloc test #70 (memory, time) - (8192, 93)
+Small alloc test #71 (memory, time) - (8192, 125)
+Small alloc test #72 (memory, time) - (8192, 88)
+Small alloc test #73 (memory, time) - (8192, 84)
+Small alloc test #74 (memory, time) - (8192, 143)
+Small alloc test #75 (memory, time) - (8192, 99)
+Small alloc test #76 (memory, time) - (8192, 91)
+Small alloc test #77 (memory, time) - (8192, 118)
+Small alloc test #78 (memory, time) - (8192, 87)
+Small alloc test #79 (memory, time) - (8192, 88)
+Small alloc test #80 (memory, time) - (8192, 127)
+Small alloc test #81 (memory, time) - (8192, 99)
+Small alloc test #82 (memory, time) - (8192, 91)
+Small alloc test #83 (memory, time) - (8192, 92)
+Small alloc test #84 (memory, time) - (8192, 116)
+Small alloc test #85 (memory, time) - (8192, 86)
+Small alloc test #86 (memory, time) - (8192, 83)
+Small alloc test #87 (memory, time) - (8192, 82)
+Small alloc test #88 (memory, time) - (8192, 84)
+Small alloc test #89 (memory, time) - (8192, 84)
+Small alloc test #90 (memory, time) - (8192, 130)
+Small alloc test #91 (memory, time) - (8192, 92)
+Small alloc test #92 (memory, time) - (8192, 94)
+Small alloc test #93 (memory, time) - (8192, 114)
+Small alloc test #94 (memory, time) - (8192, 84)
+Small alloc test #95 (memory, time) - (8192, 93)
+Small alloc test #96 (memory, time) - (8192, 111)
+Small alloc test #97 (memory, time) - (8192, 92)
+Small alloc test #98 (memory, time) - (8192, 91)
+Small alloc test #99 (memory, time) - (8192, 120)
+Small alloc test #100 (memory, time) - (8192, 87)
+Allocating 84359 * 50 chunks 100 times with stragety 1
+Big alloc test #1 (memory, time) - (4300800, 1779)
+Big alloc test #2 (memory, time) - (4300800, 1631)
+Big alloc test #3 (memory, time) - (4300800, 1871)
+Big alloc test #4 (memory, time) - (4300800, 1765)
+Big alloc test #5 (memory, time) - (4300800, 1756)
+Big alloc test #6 (memory, time) - (4300800, 1781)
+Big alloc test #7 (memory, time) - (4300800, 1763)
+Big alloc test #8 (memory, time) - (4300800, 1811)
+Big alloc test #9 (memory, time) - (4300800, 1862)
+Big alloc test #10 (memory, time) - (4300800, 1943)
+Big alloc test #11 (memory, time) - (4300800, 1891)
+Big alloc test #12 (memory, time) - (4300800, 2135)
+Big alloc test #13 (memory, time) - (4300800, 1789)
+Big alloc test #14 (memory, time) - (4300800, 1908)
+Big alloc test #15 (memory, time) - (4300800, 1937)
+Big alloc test #16 (memory, time) - (4300800, 1941)
+Big alloc test #17 (memory, time) - (4300800, 1981)
+Big alloc test #18 (memory, time) - (4300800, 1883)
+Big alloc test #19 (memory, time) - (4300800, 2079)
+Big alloc test #20 (memory, time) - (4300800, 1855)
+Big alloc test #21 (memory, time) - (4300800, 2081)
+Big alloc test #22 (memory, time) - (4300800, 1724)
+Big alloc test #23 (memory, time) - (4300800, 2002)
+Big alloc test #24 (memory, time) - (4300800, 1694)
+Big alloc test #25 (memory, time) - (4300800, 1842)
+Big alloc test #26 (memory, time) - (4300800, 2196)
+Big alloc test #27 (memory, time) - (4300800, 1845)
+Big alloc test #28 (memory, time) - (4300800, 1832)
+Big alloc test #29 (memory, time) - (4300800, 1807)
+Big alloc test #30 (memory, time) - (4300800, 1661)
+Big alloc test #31 (memory, time) - (4300800, 1872)
+Big alloc test #32 (memory, time) - (4300800, 1624)
+Big alloc test #33 (memory, time) - (4300800, 1719)
+Big alloc test #34 (memory, time) - (4300800, 1655)
+Big alloc test #35 (memory, time) - (4300800, 1674)
+Big alloc test #36 (memory, time) - (4300800, 1737)
+Big alloc test #37 (memory, time) - (4300800, 1778)
+Big alloc test #38 (memory, time) - (4300800, 1705)
+Big alloc test #39 (memory, time) - (4300800, 1780)
+Big alloc test #40 (memory, time) - (4300800, 1677)
+Big alloc test #41 (memory, time) - (4300800, 1911)
+Big alloc test #42 (memory, time) - (4300800, 1827)
+Big alloc test #43 (memory, time) - (4300800, 2052)
+Big alloc test #44 (memory, time) - (4300800, 1899)
+Big alloc test #45 (memory, time) - (4300800, 2083)
+Big alloc test #46 (memory, time) - (4300800, 1863)
+Big alloc test #47 (memory, time) - (4300800, 1807)
+Big alloc test #48 (memory, time) - (4300800, 1889)
+Big alloc test #49 (memory, time) - (4300800, 1820)
+Big alloc test #50 (memory, time) - (4300800, 2099)
+Big alloc test #51 (memory, time) - (4300800, 1825)
+Big alloc test #52 (memory, time) - (4300800, 1759)
+Big alloc test #53 (memory, time) - (4300800, 1756)
+Big alloc test #54 (memory, time) - (4300800, 2151)
+Big alloc test #55 (memory, time) - (4300800, 1686)
+Big alloc test #56 (memory, time) - (4300800, 2128)
+Big alloc test #57 (memory, time) - (4300800, 1726)
+Big alloc test #58 (memory, time) - (4300800, 2113)
+Big alloc test #59 (memory, time) - (4300800, 1782)
+Big alloc test #60 (memory, time) - (4300800, 1766)
+Big alloc test #61 (memory, time) - (4300800, 1793)
+Big alloc test #62 (memory, time) - (4300800, 1832)
+Big alloc test #63 (memory, time) - (4300800, 1694)
+Big alloc test #64 (memory, time) - (4300800, 1816)
+Big alloc test #65 (memory, time) - (4300800, 1627)
+Big alloc test #66 (memory, time) - (4300800, 1743)
+Big alloc test #67 (memory, time) - (4300800, 1757)
+Big alloc test #68 (memory, time) - (4300800, 1697)
+Big alloc test #69 (memory, time) - (4300800, 1830)
+Big alloc test #70 (memory, time) - (4300800, 1731)
+Big alloc test #71 (memory, time) - (4300800, 2062)
+Big alloc test #72 (memory, time) - (4300800, 1751)
+Big alloc test #73 (memory, time) - (4300800, 2101)
+Big alloc test #74 (memory, time) - (4300800, 1824)
+Big alloc test #75 (memory, time) - (4300800, 2125)
+Big alloc test #76 (memory, time) - (4300800, 1878)
+Big alloc test #77 (memory, time) - (4300800, 1939)
+Big alloc test #78 (memory, time) - (4300800, 1791)
+Big alloc test #79 (memory, time) - (4300800, 1781)
+Big alloc test #80 (memory, time) - (4300800, 2031)
+Big alloc test #81 (memory, time) - (4300800, 1832)
+Big alloc test #82 (memory, time) - (4300800, 2040)
+Big alloc test #83 (memory, time) - (4300800, 1803)
+Big alloc test #84 (memory, time) - (4300800, 1796)
+Big alloc test #85 (memory, time) - (4300800, 2089)
+Big alloc test #86 (memory, time) - (4300800, 1684)
+Big alloc test #87 (memory, time) - (4300800, 1747)
+Big alloc test #88 (memory, time) - (4300800, 2193)
+Big alloc test #89 (memory, time) - (4300800, 1733)
+Big alloc test #90 (memory, time) - (4300800, 1923)
+Big alloc test #91 (memory, time) - (4300800, 1726)
+Big alloc test #92 (memory, time) - (4300800, 1803)
+Big alloc test #93 (memory, time) - (4300800, 1763)
+Big alloc test #94 (memory, time) - (4300800, 1803)
+Big alloc test #95 (memory, time) - (4300800, 1717)
+Big alloc test #96 (memory, time) - (4300800, 1892)
+Big alloc test #97 (memory, time) - (4300800, 1721)
+Big alloc test #98 (memory, time) - (4300800, 1855)
+Big alloc test #99 (memory, time) - (4300800, 1794)
+Big alloc test #100 (memory, time) - (4300800, 1750)
+Allocating 250 chunks between [1 and 50000] 100 times with stragety 1 and seed 1717523
+Random alloc test #1 (memory, time) - (12288000, 12114)
+Random alloc test #2 (memory, time) - (8192000, 12508)
+Random alloc test #3 (memory, time) - (5120000, 10898)
+Random alloc test #4 (memory, time) - (4096000, 11346)
+Random alloc test #5 (memory, time) - (11264000, 10814)
+Random alloc test #6 (memory, time) - (5120000, 10991)
+Random alloc test #7 (memory, time) - (3072000, 11588)
+Random alloc test #8 (memory, time) - (5120000, 10940)
+Random alloc test #9 (memory, time) - (131072, 1454)
+Random alloc test #10 (memory, time) - (512000, 4433)
+Random alloc test #11 (memory, time) - (6144000, 10493)
+Random alloc test #12 (memory, time) - (6144000, 10599)
+Random alloc test #13 (memory, time) - (258048, 2298)
+Random alloc test #14 (memory, time) - (6144000, 11014)
+Random alloc test #15 (memory, time) - (24576, 485)
+Random alloc test #16 (memory, time) - (4096000, 11797)
+Random alloc test #17 (memory, time) - (2048000, 11009)
+Random alloc test #18 (memory, time) - (7168000, 11094)
+Random alloc test #19 (memory, time) - (6144000, 10503)
+Random alloc test #20 (memory, time) - (6144000, 10406)
+Random alloc test #21 (memory, time) - (11264000, 10633)
+Random alloc test #22 (memory, time) - (11264000, 11178)
+Random alloc test #23 (memory, time) - (11264000, 10685)
+Random alloc test #24 (memory, time) - (6144000, 10840)
+Random alloc test #25 (memory, time) - (9216000, 10896)
+Random alloc test #26 (memory, time) - (12288000, 11520)
+Random alloc test #27 (memory, time) - (512000, 4465)
+Random alloc test #28 (memory, time) - (10240000, 10897)
+Random alloc test #29 (memory, time) - (6144000, 12125)
+Random alloc test #30 (memory, time) - (4096000, 8916)
+Random alloc test #31 (memory, time) - (9216000, 11414)
+Random alloc test #32 (memory, time) - (6144000, 10503)
+Random alloc test #33 (memory, time) - (4096000, 15308)
+Random alloc test #34 (memory, time) - (7168000, 10625)
+Random alloc test #35 (memory, time) - (12288000, 12113)
+Random alloc test #36 (memory, time) - (5120000, 10981)
+Random alloc test #37 (memory, time) - (2048000, 10406)
+Random alloc test #38 (memory, time) - (344064, 3042)
+Random alloc test #39 (memory, time) - (13312000, 10165)
+Random alloc test #40 (memory, time) - (9216000, 10265)
+Random alloc test #41 (memory, time) - (9216000, 10569)
+Random alloc test #42 (memory, time) - (8192000, 14226)
+Random alloc test #43 (memory, time) - (4096000, 12892)
+Random alloc test #44 (memory, time) - (7168000, 11340)
+Random alloc test #45 (memory, time) - (12288000, 11907)
+Random alloc test #46 (memory, time) - (5120000, 10185)
+Random alloc test #47 (memory, time) - (11264000, 11085)
+Random alloc test #48 (memory, time) - (7168000, 11186)
+Random alloc test #49 (memory, time) - (8192000, 12732)
+Random alloc test #50 (memory, time) - (10240000, 10841)
+Random alloc test #51 (memory, time) - (10240000, 10646)
+Random alloc test #52 (memory, time) - (7168000, 10430)
+Random alloc test #53 (memory, time) - (4096000, 11214)
+Random alloc test #54 (memory, time) - (2048000, 10952)
+Random alloc test #55 (memory, time) - (5120000, 11024)
+Random alloc test #56 (memory, time) - (5120000, 10857)
+Random alloc test #57 (memory, time) - (7168000, 10465)
+Random alloc test #58 (memory, time) - (8192000, 12194)
+Random alloc test #59 (memory, time) - (12288000, 11179)
+Random alloc test #60 (memory, time) - (5120000, 11372)
+Random alloc test #61 (memory, time) - (49152, 716)
+Random alloc test #62 (memory, time) - (7168000, 11170)
+Random alloc test #63 (memory, time) - (13312000, 11184)
+Random alloc test #64 (memory, time) - (9216000, 11194)
+Random alloc test #65 (memory, time) - (5120000, 10096)
+Random alloc test #66 (memory, time) - (9216000, 10632)
+Random alloc test #67 (memory, time) - (6144000, 10380)
+Random alloc test #68 (memory, time) - (8192000, 12728)
+Random alloc test #69 (memory, time) - (9216000, 11341)
+Random alloc test #70 (memory, time) - (11264000, 11746)
+Random alloc test #71 (memory, time) - (8192000, 11919)
+Random alloc test #72 (memory, time) - (11264000, 10453)
+Random alloc test #73 (memory, time) - (11264000, 10370)
+Random alloc test #74 (memory, time) - (4096000, 12204)
+Random alloc test #75 (memory, time) - (8192000, 12768)
+Random alloc test #76 (memory, time) - (11264000, 11449)
+Random alloc test #77 (memory, time) - (7168000, 10556)
+Random alloc test #78 (memory, time) - (2048000, 10868)
+Random alloc test #79 (memory, time) - (7168000, 11220)
+Random alloc test #80 (memory, time) - (7168000, 10639)
+Random alloc test #81 (memory, time) - (3072000, 10854)
+Random alloc test #82 (memory, time) - (2048000, 10968)
+Random alloc test #83 (memory, time) - (8192000, 11964)
+Random alloc test #84 (memory, time) - (5120000, 10599)
+Random alloc test #85 (memory, time) - (12288000, 11317)
+Random alloc test #86 (memory, time) - (2048000, 10591)
+Random alloc test #87 (memory, time) - (512000, 4427)
+Random alloc test #88 (memory, time) - (10240000, 10403)
+Random alloc test #89 (memory, time) - (8192000, 12950)
+Random alloc test #90 (memory, time) - (172032, 1644)
+Random alloc test #91 (memory, time) - (7168000, 11566)
+Random alloc test #92 (memory, time) - (7168000, 10377)
+Random alloc test #93 (memory, time) - (7168000, 10966)
+Random alloc test #94 (memory, time) - (10240000, 10850)
+Random alloc test #95 (memory, time) - (12288000, 11638)
+Random alloc test #96 (memory, time) - (8192000, 13340)
+Random alloc test #97 (memory, time) - (3072000, 11370)
+Random alloc test #98 (memory, time) - (10240000, 10488)
+Random alloc test #99 (memory, time) - (4096000, 11789)
+Random alloc test #100 (memory, time) - (11264000, 10498)
+Allocating 19 * 100 chunks 100 times with stragety 2
+Small alloc test #1 (memory, time) - (8192, 170)
+Small alloc test #2 (memory, time) - (8192, 172)
+Small alloc test #3 (memory, time) - (8192, 92)
+Small alloc test #4 (memory, time) - (8192, 116)
+Small alloc test #5 (memory, time) - (8192, 87)
+Small alloc test #6 (memory, time) - (8192, 93)
+Small alloc test #7 (memory, time) - (8192, 118)
+Small alloc test #8 (memory, time) - (8192, 91)
+Small alloc test #9 (memory, time) - (8192, 88)
+Small alloc test #10 (memory, time) - (8192, 117)
+Small alloc test #11 (memory, time) - (8192, 85)
+Small alloc test #12 (memory, time) - (8192, 83)
+Small alloc test #13 (memory, time) - (8192, 146)
+Small alloc test #14 (memory, time) - (8192, 91)
+Small alloc test #15 (memory, time) - (8192, 95)
+Small alloc test #16 (memory, time) - (8192, 131)
+Small alloc test #17 (memory, time) - (8192, 84)
+Small alloc test #18 (memory, time) - (8192, 87)
+Small alloc test #19 (memory, time) - (8192, 140)
+Small alloc test #20 (memory, time) - (8192, 92)
+Small alloc test #21 (memory, time) - (8192, 113)
+Small alloc test #22 (memory, time) - (8192, 120)
+Small alloc test #23 (memory, time) - (8192, 85)
+Small alloc test #24 (memory, time) - (8192, 95)
+Small alloc test #25 (memory, time) - (8192, 147)
+Small alloc test #26 (memory, time) - (8192, 93)
+Small alloc test #27 (memory, time) - (8192, 95)
+Small alloc test #28 (memory, time) - (8192, 120)
+Small alloc test #29 (memory, time) - (8192, 84)
+Small alloc test #30 (memory, time) - (8192, 90)
+Small alloc test #31 (memory, time) - (8192, 152)
+Small alloc test #32 (memory, time) - (8192, 94)
+Small alloc test #33 (memory, time) - (8192, 125)
+Small alloc test #34 (memory, time) - (8192, 121)
+Small alloc test #35 (memory, time) - (8192, 85)
+Small alloc test #36 (memory, time) - (8192, 84)
+Small alloc test #37 (memory, time) - (8192, 174)
+Small alloc test #38 (memory, time) - (8192, 93)
+Small alloc test #39 (memory, time) - (8192, 122)
+Small alloc test #40 (memory, time) - (8192, 84)
+Small alloc test #41 (memory, time) - (8192, 84)
+Small alloc test #42 (memory, time) - (8192, 186)
+Small alloc test #43 (memory, time) - (8192, 94)
+Small alloc test #44 (memory, time) - (8192, 95)
+Small alloc test #45 (memory, time) - (8192, 125)
+Small alloc test #46 (memory, time) - (8192, 86)
+Small alloc test #47 (memory, time) - (8192, 98)
+Small alloc test #48 (memory, time) - (8192, 225)
+Small alloc test #49 (memory, time) - (8192, 93)
+Small alloc test #50 (memory, time) - (8192, 92)
+Small alloc test #51 (memory, time) - (8192, 123)
+Small alloc test #52 (memory, time) - (8192, 86)
+Small alloc test #53 (memory, time) - (8192, 86)
+Small alloc test #54 (memory, time) - (8192, 88)
+Small alloc test #55 (memory, time) - (8192, 84)
+Small alloc test #56 (memory, time) - (8192, 90)
+Small alloc test #57 (memory, time) - (8192, 86)
+Small alloc test #58 (memory, time) - (8192, 83)
+Small alloc test #59 (memory, time) - (8192, 431)
+Small alloc test #60 (memory, time) - (8192, 102)
+Small alloc test #61 (memory, time) - (8192, 288)
+Small alloc test #62 (memory, time) - (8192, 96)
+Small alloc test #63 (memory, time) - (8192, 127)
+Small alloc test #64 (memory, time) - (8192, 95)
+Small alloc test #65 (memory, time) - (8192, 92)
+Small alloc test #66 (memory, time) - (8192, 308)
+Small alloc test #67 (memory, time) - (8192, 90)
+Small alloc test #68 (memory, time) - (8192, 162)
+Small alloc test #69 (memory, time) - (8192, 95)
+Small alloc test #70 (memory, time) - (8192, 101)
+Small alloc test #71 (memory, time) - (8192, 335)
+Small alloc test #72 (memory, time) - (8192, 123)
+Small alloc test #73 (memory, time) - (8192, 134)
+Small alloc test #74 (memory, time) - (8192, 94)
+Small alloc test #75 (memory, time) - (8192, 96)
+Small alloc test #76 (memory, time) - (8192, 323)
+Small alloc test #77 (memory, time) - (8192, 107)
+Small alloc test #78 (memory, time) - (8192, 132)
+Small alloc test #79 (memory, time) - (8192, 91)
+Small alloc test #80 (memory, time) - (8192, 96)
+Small alloc test #81 (memory, time) - (8192, 340)
+Small alloc test #82 (memory, time) - (8192, 117)
+Small alloc test #83 (memory, time) - (8192, 115)
+Small alloc test #84 (memory, time) - (8192, 91)
+Small alloc test #85 (memory, time) - (8192, 90)
+Small alloc test #86 (memory, time) - (8192, 338)
+Small alloc test #87 (memory, time) - (8192, 103)
+Small alloc test #88 (memory, time) - (8192, 106)
+Small alloc test #89 (memory, time) - (8192, 91)
+Small alloc test #90 (memory, time) - (8192, 89)
+Small alloc test #91 (memory, time) - (8192, 256)
+Small alloc test #92 (memory, time) - (8192, 88)
+Small alloc test #93 (memory, time) - (8192, 104)
+Small alloc test #94 (memory, time) - (8192, 97)
+Small alloc test #95 (memory, time) - (8192, 89)
+Small alloc test #96 (memory, time) - (8192, 94)
+Small alloc test #97 (memory, time) - (8192, 201)
+Small alloc test #98 (memory, time) - (8192, 88)
+Small alloc test #99 (memory, time) - (8192, 105)
+Small alloc test #100 (memory, time) - (8192, 96)
+Allocating 84359 * 50 chunks 100 times with stragety 2
+Big alloc test #1 (memory, time) - (4300800, 1701)
+Big alloc test #2 (memory, time) - (4300800, 2007)
+Big alloc test #3 (memory, time) - (4300800, 1663)
+Big alloc test #4 (memory, time) - (4300800, 2035)
+Big alloc test #5 (memory, time) - (4300800, 1626)
+Big alloc test #6 (memory, time) - (4300800, 2084)
+Big alloc test #7 (memory, time) - (4300800, 1664)
+Big alloc test #8 (memory, time) - (4300800, 1965)
+Big alloc test #9 (memory, time) - (4300800, 1721)
+Big alloc test #10 (memory, time) - (4300800, 1644)
+Big alloc test #11 (memory, time) - (4300800, 1744)
+Big alloc test #12 (memory, time) - (4300800, 1633)
+Big alloc test #13 (memory, time) - (4300800, 1706)
+Big alloc test #14 (memory, time) - (4300800, 1875)
+Big alloc test #15 (memory, time) - (4300800, 1649)
+Big alloc test #16 (memory, time) - (4300800, 1725)
+Big alloc test #17 (memory, time) - (4300800, 1622)
+Big alloc test #18 (memory, time) - (4300800, 1596)
+Big alloc test #19 (memory, time) - (4300800, 1771)
+Big alloc test #20 (memory, time) - (4300800, 1614)
+Big alloc test #21 (memory, time) - (4300800, 1761)
+Big alloc test #22 (memory, time) - (4300800, 1634)
+Big alloc test #23 (memory, time) - (4300800, 1802)
+Big alloc test #24 (memory, time) - (4300800, 1865)
+Big alloc test #25 (memory, time) - (4300800, 1842)
+Big alloc test #26 (memory, time) - (4300800, 1932)
+Big alloc test #27 (memory, time) - (4300800, 1912)
+Big alloc test #28 (memory, time) - (4300800, 2126)
+Big alloc test #29 (memory, time) - (4300800, 1954)
+Big alloc test #30 (memory, time) - (4300800, 2306)
+Big alloc test #31 (memory, time) - (4300800, 1926)
+Big alloc test #32 (memory, time) - (4300800, 2399)
+Big alloc test #33 (memory, time) - (4300800, 1804)
+Big alloc test #34 (memory, time) - (4300800, 2145)
+Big alloc test #35 (memory, time) - (4300800, 1631)
+Big alloc test #36 (memory, time) - (4300800, 1752)
+Big alloc test #37 (memory, time) - (4300800, 2223)
+Big alloc test #38 (memory, time) - (4300800, 1649)
+Big alloc test #39 (memory, time) - (4300800, 2096)
+Big alloc test #40 (memory, time) - (4300800, 1717)
+Big alloc test #41 (memory, time) - (4300800, 1950)
+Big alloc test #42 (memory, time) - (4300800, 1668)
+Big alloc test #43 (memory, time) - (4300800, 1675)
+Big alloc test #44 (memory, time) - (4300800, 1768)
+Big alloc test #45 (memory, time) - (4300800, 1814)
+Big alloc test #46 (memory, time) - (4300800, 1676)
+Big alloc test #47 (memory, time) - (4300800, 1747)
+Big alloc test #48 (memory, time) - (4300800, 1630)
+Big alloc test #49 (memory, time) - (4300800, 1757)
+Big alloc test #50 (memory, time) - (4300800, 1632)
+Big alloc test #51 (memory, time) - (4300800, 1721)
+Big alloc test #52 (memory, time) - (4300800, 1613)
+Big alloc test #53 (memory, time) - (4300800, 1731)
+Big alloc test #54 (memory, time) - (4300800, 1598)
+Big alloc test #55 (memory, time) - (4300800, 1630)
+Big alloc test #56 (memory, time) - (4300800, 1902)
+Big alloc test #57 (memory, time) - (4300800, 1964)
+Big alloc test #58 (memory, time) - (4300800, 1895)
+Big alloc test #59 (memory, time) - (4300800, 1923)
+Big alloc test #60 (memory, time) - (4300800, 1709)
+Big alloc test #61 (memory, time) - (4300800, 1949)
+Big alloc test #62 (memory, time) - (4300800, 2232)
+Big alloc test #63 (memory, time) - (4300800, 1948)
+Big alloc test #64 (memory, time) - (4300800, 2319)
+Big alloc test #65 (memory, time) - (4300800, 1900)
+Big alloc test #66 (memory, time) - (4300800, 2252)
+Big alloc test #67 (memory, time) - (4300800, 1828)
+Big alloc test #68 (memory, time) - (4300800, 2072)
+Big alloc test #69 (memory, time) - (4300800, 1895)
+Big alloc test #70 (memory, time) - (4300800, 1678)
+Big alloc test #71 (memory, time) - (4300800, 2107)
+Big alloc test #72 (memory, time) - (4300800, 1651)
+Big alloc test #73 (memory, time) - (4300800, 1995)
+Big alloc test #74 (memory, time) - (4300800, 1675)
+Big alloc test #75 (memory, time) - (4300800, 1707)
+Big alloc test #76 (memory, time) - (4300800, 1707)
+Big alloc test #77 (memory, time) - (4300800, 1660)
+Big alloc test #78 (memory, time) - (4300800, 1656)
+Big alloc test #79 (memory, time) - (4300800, 1767)
+Big alloc test #80 (memory, time) - (4300800, 1627)
+Big alloc test #81 (memory, time) - (4300800, 1588)
+Big alloc test #82 (memory, time) - (4300800, 1801)
+Big alloc test #83 (memory, time) - (4300800, 1623)
+Big alloc test #84 (memory, time) - (4300800, 1739)
+Big alloc test #85 (memory, time) - (4300800, 1651)
+Big alloc test #86 (memory, time) - (4300800, 1631)
+Big alloc test #87 (memory, time) - (4300800, 1862)
+Big alloc test #88 (memory, time) - (4300800, 1826)
+Big alloc test #89 (memory, time) - (4300800, 1921)
+Big alloc test #90 (memory, time) - (4300800, 1856)
+Big alloc test #91 (memory, time) - (4300800, 1860)
+Big alloc test #92 (memory, time) - (4300800, 2084)
+Big alloc test #93 (memory, time) - (4300800, 1860)
+Big alloc test #94 (memory, time) - (4300800, 2150)
+Big alloc test #95 (memory, time) - (4300800, 1928)
+Big alloc test #96 (memory, time) - (4300800, 1855)
+Big alloc test #97 (memory, time) - (4300800, 2230)
+Big alloc test #98 (memory, time) - (4300800, 1832)
+Big alloc test #99 (memory, time) - (4300800, 2384)
+Big alloc test #100 (memory, time) - (4300800, 1857)
+Allocating 250 chunks between [1 and 50000] 100 times with stragety 2 and seed 1717523
+Random alloc test #1 (memory, time) - (12288000, 12470)
+Random alloc test #2 (memory, time) - (8192000, 12319)
+Random alloc test #3 (memory, time) - (5120000, 10102)
+Random alloc test #4 (memory, time) - (4096000, 11538)
+Random alloc test #5 (memory, time) - (11264000, 11139)
+Random alloc test #6 (memory, time) - (5120000, 10691)
+Random alloc test #7 (memory, time) - (3072000, 11743)
+Random alloc test #8 (memory, time) - (5120000, 10812)
+Random alloc test #9 (memory, time) - (131072, 1259)
+Random alloc test #10 (memory, time) - (512000, 4236)
+Random alloc test #11 (memory, time) - (6144000, 10405)
+Random alloc test #12 (memory, time) - (6144000, 10795)
+Random alloc test #13 (memory, time) - (258048, 2483)
+Random alloc test #14 (memory, time) - (6144000, 10926)
+Random alloc test #15 (memory, time) - (24576, 532)
+Random alloc test #16 (memory, time) - (4096000, 11912)
+Random alloc test #17 (memory, time) - (2048000, 11085)
+Random alloc test #18 (memory, time) - (7168000, 10633)
+Random alloc test #19 (memory, time) - (6144000, 10467)
+Random alloc test #20 (memory, time) - (6144000, 10730)
+Random alloc test #21 (memory, time) - (11264000, 11333)
+Random alloc test #22 (memory, time) - (11264000, 10637)
+Random alloc test #23 (memory, time) - (11264000, 10826)
+Random alloc test #24 (memory, time) - (6144000, 10910)
+Random alloc test #25 (memory, time) - (9216000, 10702)
+Random alloc test #26 (memory, time) - (12288000, 11989)
+Random alloc test #27 (memory, time) - (512000, 4508)
+Random alloc test #28 (memory, time) - (10240000, 10600)
+Random alloc test #29 (memory, time) - (6144000, 11594)
+Random alloc test #30 (memory, time) - (4096000, 8757)
+Random alloc test #31 (memory, time) - (9216000, 10624)
+Random alloc test #32 (memory, time) - (6144000, 10798)
+Random alloc test #33 (memory, time) - (4096000, 11473)
+Random alloc test #34 (memory, time) - (7168000, 10939)
+Random alloc test #35 (memory, time) - (12288000, 11579)
+Random alloc test #36 (memory, time) - (5120000, 10704)
+Random alloc test #37 (memory, time) - (2048000, 11159)
+Random alloc test #38 (memory, time) - (344064, 3145)
+Random alloc test #39 (memory, time) - (13312000, 10343)
+Random alloc test #40 (memory, time) - (9216000, 11360)
+Random alloc test #41 (memory, time) - (9216000, 11077)
+Random alloc test #42 (memory, time) - (8192000, 12869)
+Random alloc test #43 (memory, time) - (4096000, 12327)
+Random alloc test #44 (memory, time) - (7168000, 11339)
+Random alloc test #45 (memory, time) - (12288000, 12302)
+Random alloc test #46 (memory, time) - (5120000, 10867)
+Random alloc test #47 (memory, time) - (11264000, 10873)
+Random alloc test #48 (memory, time) - (7168000, 10601)
+Random alloc test #49 (memory, time) - (8192000, 12283)
+Random alloc test #50 (memory, time) - (10240000, 10711)
+Random alloc test #51 (memory, time) - (10240000, 10509)
+Random alloc test #52 (memory, time) - (7168000, 11623)
+Random alloc test #53 (memory, time) - (4096000, 11795)
+Random alloc test #54 (memory, time) - (2048000, 10653)
+Random alloc test #55 (memory, time) - (5120000, 10557)
+Random alloc test #56 (memory, time) - (5120000, 10576)
+Random alloc test #57 (memory, time) - (7168000, 10258)
+Random alloc test #58 (memory, time) - (8192000, 12809)
+Random alloc test #59 (memory, time) - (12288000, 11662)
+Random alloc test #60 (memory, time) - (5120000, 10639)
+Random alloc test #61 (memory, time) - (49152, 677)
+Random alloc test #62 (memory, time) - (7168000, 10562)
+Random alloc test #63 (memory, time) - (13312000, 10826)
+Random alloc test #64 (memory, time) - (9216000, 10890)
+Random alloc test #65 (memory, time) - (5120000, 9924)
+Random alloc test #66 (memory, time) - (9216000, 11306)
+Random alloc test #67 (memory, time) - (6144000, 10817)
+Random alloc test #68 (memory, time) - (8192000, 12297)
+Random alloc test #69 (memory, time) - (9216000, 10923)
+Random alloc test #70 (memory, time) - (11264000, 11492)
+Random alloc test #71 (memory, time) - (8192000, 11710)
+Random alloc test #72 (memory, time) - (11264000, 10904)
+Random alloc test #73 (memory, time) - (11264000, 10717)
+Random alloc test #74 (memory, time) - (4096000, 12045)
+Random alloc test #75 (memory, time) - (8192000, 12456)
+Random alloc test #76 (memory, time) - (11264000, 10967)
+Random alloc test #77 (memory, time) - (7168000, 10335)
+Random alloc test #78 (memory, time) - (2048000, 10726)
+Random alloc test #79 (memory, time) - (7168000, 11828)
+Random alloc test #80 (memory, time) - (7168000, 11178)
+Random alloc test #81 (memory, time) - (3072000, 10896)
+Random alloc test #82 (memory, time) - (2048000, 10673)
+Random alloc test #83 (memory, time) - (8192000, 11759)
+Random alloc test #84 (memory, time) - (5120000, 10578)
+Random alloc test #85 (memory, time) - (12288000, 11685)
+Random alloc test #86 (memory, time) - (2048000, 11153)
+Random alloc test #87 (memory, time) - (512000, 4662)
+Random alloc test #88 (memory, time) - (10240000, 11600)
+Random alloc test #89 (memory, time) - (8192000, 12158)
+Random alloc test #90 (memory, time) - (172032, 1736)
+Random alloc test #91 (memory, time) - (7168000, 10215)
+Random alloc test #92 (memory, time) - (7168000, 10568)
+Random alloc test #93 (memory, time) - (7168000, 11080)
+Random alloc test #94 (memory, time) - (10240000, 11701)
+Random alloc test #95 (memory, time) - (12288000, 12022)
+Random alloc test #96 (memory, time) - (8192000, 13013)
+Random alloc test #97 (memory, time) - (3072000, 10227)
+Random alloc test #98 (memory, time) - (10240000, 10580)
+Random alloc test #99 (memory, time) - (4096000, 11804)
+Random alloc test #100 (memory, time) - (11264000, 11539)
+Allocating 19 * 100 chunks 100 times with stragety 3
+Small alloc test #1 (memory, time) - (8192, 331)
+Small alloc test #2 (memory, time) - (8192, 294)
+Small alloc test #3 (memory, time) - (8192, 106)
+Small alloc test #4 (memory, time) - (8192, 160)
+Small alloc test #5 (memory, time) - (8192, 96)
+Small alloc test #6 (memory, time) - (8192, 102)
+Small alloc test #7 (memory, time) - (8192, 222)
+Small alloc test #8 (memory, time) - (8192, 89)
+Small alloc test #9 (memory, time) - (8192, 146)
+Small alloc test #10 (memory, time) - (8192, 93)
+Small alloc test #11 (memory, time) - (8192, 92)
+Small alloc test #12 (memory, time) - (8192, 128)
+Small alloc test #13 (memory, time) - (8192, 86)
+Small alloc test #14 (memory, time) - (8192, 91)
+Small alloc test #15 (memory, time) - (8192, 137)
+Small alloc test #16 (memory, time) - (8192, 93)
+Small alloc test #17 (memory, time) - (8192, 95)
+Small alloc test #18 (memory, time) - (8192, 121)
+Small alloc test #19 (memory, time) - (8192, 88)
+Small alloc test #20 (memory, time) - (8192, 101)
+Small alloc test #21 (memory, time) - (8192, 142)
+Small alloc test #22 (memory, time) - (8192, 94)
+Small alloc test #23 (memory, time) - (8192, 95)
+Small alloc test #24 (memory, time) - (8192, 126)
+Small alloc test #25 (memory, time) - (8192, 89)
+Small alloc test #26 (memory, time) - (8192, 88)
+Small alloc test #27 (memory, time) - (8192, 155)
+Small alloc test #28 (memory, time) - (8192, 95)
+Small alloc test #29 (memory, time) - (8192, 95)
+Small alloc test #30 (memory, time) - (8192, 134)
+Small alloc test #31 (memory, time) - (8192, 88)
+Small alloc test #32 (memory, time) - (8192, 88)
+Small alloc test #33 (memory, time) - (8192, 86)
+Small alloc test #34 (memory, time) - (8192, 87)
+Small alloc test #35 (memory, time) - (8192, 88)
+Small alloc test #36 (memory, time) - (8192, 88)
+Small alloc test #37 (memory, time) - (8192, 85)
+Small alloc test #38 (memory, time) - (8192, 212)
+Small alloc test #39 (memory, time) - (8192, 93)
+Small alloc test #40 (memory, time) - (8192, 90)
+Small alloc test #41 (memory, time) - (8192, 313)
+Small alloc test #42 (memory, time) - (8192, 101)
+Small alloc test #43 (memory, time) - (8192, 108)
+Small alloc test #44 (memory, time) - (8192, 91)
+Small alloc test #45 (memory, time) - (8192, 90)
+Small alloc test #46 (memory, time) - (8192, 91)
+Small alloc test #47 (memory, time) - (8192, 293)
+Small alloc test #48 (memory, time) - (8192, 89)
+Small alloc test #49 (memory, time) - (8192, 121)
+Small alloc test #50 (memory, time) - (8192, 92)
+Small alloc test #51 (memory, time) - (8192, 94)
+Small alloc test #52 (memory, time) - (8192, 291)
+Small alloc test #53 (memory, time) - (8192, 93)
+Small alloc test #54 (memory, time) - (8192, 119)
+Small alloc test #55 (memory, time) - (8192, 93)
+Small alloc test #56 (memory, time) - (8192, 90)
+Small alloc test #57 (memory, time) - (8192, 162)
+Small alloc test #58 (memory, time) - (8192, 86)
+Small alloc test #59 (memory, time) - (8192, 97)
+Small alloc test #60 (memory, time) - (8192, 106)
+Small alloc test #61 (memory, time) - (8192, 90)
+Small alloc test #62 (memory, time) - (8192, 89)
+Small alloc test #63 (memory, time) - (8192, 132)
+Small alloc test #64 (memory, time) - (8192, 85)
+Small alloc test #65 (memory, time) - (8192, 82)
+Small alloc test #66 (memory, time) - (8192, 106)
+Small alloc test #67 (memory, time) - (8192, 91)
+Small alloc test #68 (memory, time) - (8192, 89)
+Small alloc test #69 (memory, time) - (8192, 95)
+Small alloc test #70 (memory, time) - (8192, 119)
+Small alloc test #71 (memory, time) - (8192, 85)
+Small alloc test #72 (memory, time) - (8192, 99)
+Small alloc test #73 (memory, time) - (8192, 111)
+Small alloc test #74 (memory, time) - (8192, 90)
+Small alloc test #75 (memory, time) - (8192, 87)
+Small alloc test #76 (memory, time) - (8192, 119)
+Small alloc test #77 (memory, time) - (8192, 84)
+Small alloc test #78 (memory, time) - (8192, 82)
+Small alloc test #79 (memory, time) - (8192, 107)
+Small alloc test #80 (memory, time) - (8192, 92)
+Small alloc test #81 (memory, time) - (8192, 89)
+Small alloc test #82 (memory, time) - (8192, 93)
+Small alloc test #83 (memory, time) - (8192, 116)
+Small alloc test #84 (memory, time) - (8192, 85)
+Small alloc test #85 (memory, time) - (8192, 98)
+Small alloc test #86 (memory, time) - (8192, 111)
+Small alloc test #87 (memory, time) - (8192, 90)
+Small alloc test #88 (memory, time) - (8192, 89)
+Small alloc test #89 (memory, time) - (8192, 114)
+Small alloc test #90 (memory, time) - (8192, 85)
+Small alloc test #91 (memory, time) - (8192, 82)
+Small alloc test #92 (memory, time) - (8192, 107)
+Small alloc test #93 (memory, time) - (8192, 92)
+Small alloc test #94 (memory, time) - (8192, 91)
+Small alloc test #95 (memory, time) - (8192, 94)
+Small alloc test #96 (memory, time) - (8192, 117)
+Small alloc test #97 (memory, time) - (8192, 85)
+Small alloc test #98 (memory, time) - (8192, 83)
+Small alloc test #99 (memory, time) - (8192, 125)
+Small alloc test #100 (memory, time) - (8192, 89)
+Allocating 84359 * 50 chunks 100 times with stragety 3
+Big alloc test #1 (memory, time) - (4300800, 1753)
+Big alloc test #2 (memory, time) - (4300800, 1769)
+Big alloc test #3 (memory, time) - (4300800, 1727)
+Big alloc test #4 (memory, time) - (4300800, 1676)
+Big alloc test #5 (memory, time) - (4300800, 1740)
+Big alloc test #6 (memory, time) - (4300800, 1813)
+Big alloc test #7 (memory, time) - (4300800, 1848)
+Big alloc test #8 (memory, time) - (4300800, 1843)
+Big alloc test #9 (memory, time) - (4300800, 1895)
+Big alloc test #10 (memory, time) - (4300800, 1878)
+Big alloc test #11 (memory, time) - (4300800, 2093)
+Big alloc test #12 (memory, time) - (4300800, 1858)
+Big alloc test #13 (memory, time) - (4300800, 1839)
+Big alloc test #14 (memory, time) - (4300800, 2177)
+Big alloc test #15 (memory, time) - (4300800, 1922)
+Big alloc test #16 (memory, time) - (4300800, 2289)
+Big alloc test #17 (memory, time) - (4300800, 2056)
+Big alloc test #18 (memory, time) - (4300800, 2348)
+Big alloc test #19 (memory, time) - (4300800, 1992)
+Big alloc test #20 (memory, time) - (4300800, 2129)
+Big alloc test #21 (memory, time) - (4300800, 1944)
+Big alloc test #22 (memory, time) - (4300800, 2126)
+Big alloc test #23 (memory, time) - (4300800, 1901)
+Big alloc test #24 (memory, time) - (4300800, 2141)
+Big alloc test #25 (memory, time) - (4300800, 1795)
+Big alloc test #26 (memory, time) - (4300800, 1763)
+Big alloc test #27 (memory, time) - (4300800, 1648)
+Big alloc test #28 (memory, time) - (4300800, 1813)
+Big alloc test #29 (memory, time) - (4300800, 1616)
+Big alloc test #30 (memory, time) - (4300800, 1693)
+Big alloc test #31 (memory, time) - (4300800, 1619)
+Big alloc test #32 (memory, time) - (4300800, 1675)
+Big alloc test #33 (memory, time) - (4300800, 1707)
+Big alloc test #34 (memory, time) - (4300800, 1703)
+Big alloc test #35 (memory, time) - (4300800, 1676)
+Big alloc test #36 (memory, time) - (4300800, 1674)
+Big alloc test #37 (memory, time) - (4300800, 1653)
+Big alloc test #38 (memory, time) - (4300800, 1707)
+Big alloc test #39 (memory, time) - (4300800, 1738)
+Big alloc test #40 (memory, time) - (4300800, 1766)
+Big alloc test #41 (memory, time) - (4300800, 1820)
+Big alloc test #42 (memory, time) - (4300800, 1773)
+Big alloc test #43 (memory, time) - (4300800, 1944)
+Big alloc test #44 (memory, time) - (4300800, 1816)
+Big alloc test #45 (memory, time) - (4300800, 2115)
+Big alloc test #46 (memory, time) - (4300800, 1772)
+Big alloc test #47 (memory, time) - (4300800, 2276)
+Big alloc test #48 (memory, time) - (4300800, 1827)
+Big alloc test #49 (memory, time) - (4300800, 2296)
+Big alloc test #50 (memory, time) - (4300800, 1931)
+Big alloc test #51 (memory, time) - (4300800, 1946)
+Big alloc test #52 (memory, time) - (4300800, 2197)
+Big alloc test #53 (memory, time) - (4300800, 1860)
+Big alloc test #54 (memory, time) - (4300800, 1995)
+Big alloc test #55 (memory, time) - (4300800, 2126)
+Big alloc test #56 (memory, time) - (4300800, 1943)
+Big alloc test #57 (memory, time) - (4300800, 2031)
+Big alloc test #58 (memory, time) - (4300800, 1831)
+Big alloc test #59 (memory, time) - (4300800, 1680)
+Big alloc test #60 (memory, time) - (4300800, 1739)
+Big alloc test #61 (memory, time) - (4300800, 1623)
+Big alloc test #62 (memory, time) - (4300800, 1651)
+Big alloc test #63 (memory, time) - (4300800, 1623)
+Big alloc test #64 (memory, time) - (4300800, 1628)
+Big alloc test #65 (memory, time) - (4300800, 1769)
+Big alloc test #66 (memory, time) - (4300800, 1719)
+Big alloc test #67 (memory, time) - (4300800, 1658)
+Big alloc test #68 (memory, time) - (4300800, 1706)
+Big alloc test #69 (memory, time) - (4300800, 1754)
+Big alloc test #70 (memory, time) - (4300800, 1673)
+Big alloc test #71 (memory, time) - (4300800, 1796)
+Big alloc test #72 (memory, time) - (4300800, 1804)
+Big alloc test #73 (memory, time) - (4300800, 1772)
+Big alloc test #74 (memory, time) - (4300800, 2079)
+Big alloc test #75 (memory, time) - (4300800, 1822)
+Big alloc test #76 (memory, time) - (4300800, 2023)
+Big alloc test #77 (memory, time) - (4300800, 1753)
+Big alloc test #78 (memory, time) - (4300800, 2127)
+Big alloc test #79 (memory, time) - (4300800, 1790)
+Big alloc test #80 (memory, time) - (4300800, 1815)
+Big alloc test #81 (memory, time) - (4300800, 2252)
+Big alloc test #82 (memory, time) - (4300800, 1876)
+Big alloc test #83 (memory, time) - (4300800, 2122)
+Big alloc test #84 (memory, time) - (4300800, 1897)
+Big alloc test #85 (memory, time) - (4300800, 1939)
+Big alloc test #86 (memory, time) - (4300800, 2200)
+Big alloc test #87 (memory, time) - (4300800, 1854)
+Big alloc test #88 (memory, time) - (4300800, 2207)
+Big alloc test #89 (memory, time) - (4300800, 1909)
+Big alloc test #90 (memory, time) - (4300800, 1800)
+Big alloc test #91 (memory, time) - (4300800, 1780)
+Big alloc test #92 (memory, time) - (4300800, 1792)
+Big alloc test #93 (memory, time) - (4300800, 1727)
+Big alloc test #94 (memory, time) - (4300800, 1701)
+Big alloc test #95 (memory, time) - (4300800, 1604)
+Big alloc test #96 (memory, time) - (4300800, 1659)
+Big alloc test #97 (memory, time) - (4300800, 1754)
+Big alloc test #98 (memory, time) - (4300800, 1673)
+Big alloc test #99 (memory, time) - (4300800, 1711)
+Big alloc test #100 (memory, time) - (4300800, 1617)
+Allocating 250 chunks between [1 and 50000] 100 times with stragety 3 and seed 1717523
+Random alloc test #1 (memory, time) - (12288000, 11616)
+Random alloc test #2 (memory, time) - (8192000, 12940)
+Random alloc test #3 (memory, time) - (5120000, 11296)
+Random alloc test #4 (memory, time) - (4096000, 12206)
+Random alloc test #5 (memory, time) - (11264000, 10550)
+Random alloc test #6 (memory, time) - (5120000, 10296)
+Random alloc test #7 (memory, time) - (3072000, 10695)
+Random alloc test #8 (memory, time) - (5120000, 11380)
+Random alloc test #9 (memory, time) - (131072, 1397)
+Random alloc test #10 (memory, time) - (512000, 4741)
+Random alloc test #11 (memory, time) - (6144000, 11037)
+Random alloc test #12 (memory, time) - (6144000, 10826)
+Random alloc test #13 (memory, time) - (258048, 2319)
+Random alloc test #14 (memory, time) - (6144000, 10626)
+Random alloc test #15 (memory, time) - (24576, 435)
+Random alloc test #16 (memory, time) - (4096000, 11037)
+Random alloc test #17 (memory, time) - (2048000, 10859)
+Random alloc test #18 (memory, time) - (7168000, 10746)
+Random alloc test #19 (memory, time) - (6144000, 11408)
+Random alloc test #20 (memory, time) - (6144000, 10868)
+Random alloc test #21 (memory, time) - (11264000, 10451)
+Random alloc test #22 (memory, time) - (11264000, 10470)
+Random alloc test #23 (memory, time) - (11264000, 10653)
+Random alloc test #24 (memory, time) - (6144000, 10549)
+Random alloc test #25 (memory, time) - (9216000, 11634)
+Random alloc test #26 (memory, time) - (12288000, 12559)
+Random alloc test #27 (memory, time) - (512000, 4435)
+Random alloc test #28 (memory, time) - (10240000, 10750)
+Random alloc test #29 (memory, time) - (6144000, 11239)
+Random alloc test #30 (memory, time) - (4096000, 8752)
+Random alloc test #31 (memory, time) - (9216000, 10904)
+Random alloc test #32 (memory, time) - (6144000, 10796)
+Random alloc test #33 (memory, time) - (4096000, 11819)
+Random alloc test #34 (memory, time) - (7168000, 10700)
+Random alloc test #35 (memory, time) - (12288000, 11546)
+Random alloc test #36 (memory, time) - (5120000, 10453)
+Random alloc test #37 (memory, time) - (2048000, 11407)
+Random alloc test #38 (memory, time) - (344064, 2894)
+Random alloc test #39 (memory, time) - (13312000, 10824)
+Random alloc test #40 (memory, time) - (9216000, 10997)
+Random alloc test #41 (memory, time) - (9216000, 10628)
+Random alloc test #42 (memory, time) - (8192000, 12893)
+Random alloc test #43 (memory, time) - (4096000, 12654)
+Random alloc test #44 (memory, time) - (7168000, 11094)
+Random alloc test #45 (memory, time) - (12288000, 11837)
+Random alloc test #46 (memory, time) - (5120000, 10830)
+Random alloc test #47 (memory, time) - (11264000, 10574)
+Random alloc test #48 (memory, time) - (7168000, 10607)
+Random alloc test #49 (memory, time) - (8192000, 12790)
+Random alloc test #50 (memory, time) - (10240000, 10682)
+Random alloc test #51 (memory, time) - (10240000, 10895)
+Random alloc test #52 (memory, time) - (7168000, 10130)
+Random alloc test #53 (memory, time) - (4096000, 11937)
+Random alloc test #54 (memory, time) - (2048000, 11396)
+Random alloc test #55 (memory, time) - (5120000, 10781)
+Random alloc test #56 (memory, time) - (5120000, 10311)
+Random alloc test #57 (memory, time) - (7168000, 10659)
+Random alloc test #58 (memory, time) - (8192000, 12175)
+Random alloc test #59 (memory, time) - (12288000, 11554)
+Random alloc test #60 (memory, time) - (5120000, 10776)
+Random alloc test #61 (memory, time) - (49152, 818)
+Random alloc test #62 (memory, time) - (7168000, 10610)
+Random alloc test #63 (memory, time) - (13312000, 11076)
+Random alloc test #64 (memory, time) - (9216000, 10463)
+Random alloc test #65 (memory, time) - (5120000, 10555)
+Random alloc test #66 (memory, time) - (9216000, 10678)
+Random alloc test #67 (memory, time) - (6144000, 11350)
+Random alloc test #68 (memory, time) - (8192000, 12506)
+Random alloc test #69 (memory, time) - (9216000, 11244)
+Random alloc test #70 (memory, time) - (11264000, 11480)
+Random alloc test #71 (memory, time) - (8192000, 12415)
+Random alloc test #72 (memory, time) - (11264000, 10578)
+Random alloc test #73 (memory, time) - (11264000, 11439)
+Random alloc test #74 (memory, time) - (4096000, 11858)
+Random alloc test #75 (memory, time) - (8192000, 12921)
+Random alloc test #76 (memory, time) - (11264000, 11033)
+Random alloc test #77 (memory, time) - (7168000, 10920)
+Random alloc test #78 (memory, time) - (2048000, 10335)
+Random alloc test #79 (memory, time) - (7168000, 11971)
+Random alloc test #80 (memory, time) - (7168000, 11397)
+Random alloc test #81 (memory, time) - (3072000, 10642)
+Random alloc test #82 (memory, time) - (2048000, 10662)
+Random alloc test #83 (memory, time) - (8192000, 11895)
+Random alloc test #84 (memory, time) - (5120000, 10267)
+Random alloc test #85 (memory, time) - (12288000, 11622)
+Random alloc test #86 (memory, time) - (2048000, 11059)
+Random alloc test #87 (memory, time) - (512000, 4459)
+Random alloc test #88 (memory, time) - (10240000, 11583)
+Random alloc test #89 (memory, time) - (8192000, 12392)
+Random alloc test #90 (memory, time) - (172032, 1680)
+Random alloc test #91 (memory, time) - (7168000, 10760)
+Random alloc test #92 (memory, time) - (7168000, 10882)
+Random alloc test #93 (memory, time) - (7168000, 11209)
+Random alloc test #94 (memory, time) - (10240000, 11553)
+Random alloc test #95 (memory, time) - (12288000, 12001)
+Random alloc test #96 (memory, time) - (8192000, 12861)
+Random alloc test #97 (memory, time) - (3072000, 10407)
+Random alloc test #98 (memory, time) - (10240000, 11297)
+Random alloc test #99 (memory, time) - (4096000, 11786)
+Random alloc test #100 (memory, time) - (11264000, 11483)
+Allocating 19 * 100 chunks 100 times with stragety 4
+Small alloc test #1 (memory, time) - (8192, 285)
+Small alloc test #2 (memory, time) - (8192, 318)
+Small alloc test #3 (memory, time) - (8192, 93)
+Small alloc test #4 (memory, time) - (8192, 237)
+Small alloc test #5 (memory, time) - (8192, 85)
+Small alloc test #6 (memory, time) - (8192, 280)
+Small alloc test #7 (memory, time) - (8192, 81)
+Small alloc test #8 (memory, time) - (8192, 221)
+Small alloc test #9 (memory, time) - (8192, 84)
+Small alloc test #10 (memory, time) - (8192, 80)
+Small alloc test #11 (memory, time) - (8192, 306)
+Small alloc test #12 (memory, time) - (8192, 96)
+Small alloc test #13 (memory, time) - (8192, 127)
+Small alloc test #14 (memory, time) - (8192, 86)
+Small alloc test #15 (memory, time) - (8192, 89)
+Small alloc test #16 (memory, time) - (8192, 296)
+Small alloc test #17 (memory, time) - (8192, 84)
+Small alloc test #18 (memory, time) - (8192, 224)
+Small alloc test #19 (memory, time) - (8192, 86)
+Small alloc test #20 (memory, time) - (8192, 81)
+Small alloc test #21 (memory, time) - (8192, 277)
+Small alloc test #22 (memory, time) - (8192, 80)
+Small alloc test #23 (memory, time) - (8192, 76)
+Small alloc test #24 (memory, time) - (8192, 75)
+Small alloc test #25 (memory, time) - (8192, 76)
+Small alloc test #26 (memory, time) - (8192, 75)
+Small alloc test #27 (memory, time) - (8192, 76)
+Small alloc test #28 (memory, time) - (8192, 76)
+Small alloc test #29 (memory, time) - (8192, 224)
+Small alloc test #30 (memory, time) - (8192, 86)
+Small alloc test #31 (memory, time) - (8192, 124)
+Small alloc test #32 (memory, time) - (8192, 75)
+Small alloc test #33 (memory, time) - (8192, 79)
+Small alloc test #34 (memory, time) - (8192, 106)
+Small alloc test #35 (memory, time) - (8192, 80)
+Small alloc test #36 (memory, time) - (8192, 79)
+Small alloc test #37 (memory, time) - (8192, 80)
+Small alloc test #38 (memory, time) - (8192, 108)
+Small alloc test #39 (memory, time) - (8192, 76)
+Small alloc test #40 (memory, time) - (8192, 75)
+Small alloc test #41 (memory, time) - (8192, 101)
+Small alloc test #42 (memory, time) - (8192, 81)
+Small alloc test #43 (memory, time) - (8192, 75)
+Small alloc test #44 (memory, time) - (8192, 108)
+Small alloc test #45 (memory, time) - (8192, 77)
+Small alloc test #46 (memory, time) - (8192, 83)
+Small alloc test #47 (memory, time) - (8192, 101)
+Small alloc test #48 (memory, time) - (8192, 84)
+Small alloc test #49 (memory, time) - (8192, 79)
+Small alloc test #50 (memory, time) - (8192, 84)
+Small alloc test #51 (memory, time) - (8192, 114)
+Small alloc test #52 (memory, time) - (8192, 77)
+Small alloc test #53 (memory, time) - (8192, 78)
+Small alloc test #54 (memory, time) - (8192, 101)
+Small alloc test #55 (memory, time) - (8192, 81)
+Small alloc test #56 (memory, time) - (8192, 80)
+Small alloc test #57 (memory, time) - (8192, 118)
+Small alloc test #58 (memory, time) - (8192, 74)
+Small alloc test #59 (memory, time) - (8192, 75)
+Small alloc test #60 (memory, time) - (8192, 101)
+Small alloc test #61 (memory, time) - (8192, 83)
+Small alloc test #62 (memory, time) - (8192, 83)
+Small alloc test #63 (memory, time) - (8192, 87)
+Small alloc test #64 (memory, time) - (8192, 153)
+Small alloc test #65 (memory, time) - (8192, 76)
+Small alloc test #66 (memory, time) - (8192, 77)
+Small alloc test #67 (memory, time) - (8192, 101)
+Small alloc test #68 (memory, time) - (8192, 81)
+Small alloc test #69 (memory, time) - (8192, 81)
+Small alloc test #70 (memory, time) - (8192, 112)
+Small alloc test #71 (memory, time) - (8192, 76)
+Small alloc test #72 (memory, time) - (8192, 74)
+Small alloc test #73 (memory, time) - (8192, 99)
+Small alloc test #74 (memory, time) - (8192, 79)
+Small alloc test #75 (memory, time) - (8192, 79)
+Small alloc test #76 (memory, time) - (8192, 84)
+Small alloc test #77 (memory, time) - (8192, 107)
+Small alloc test #78 (memory, time) - (8192, 76)
+Small alloc test #79 (memory, time) - (8192, 78)
+Small alloc test #80 (memory, time) - (8192, 100)
+Small alloc test #81 (memory, time) - (8192, 81)
+Small alloc test #82 (memory, time) - (8192, 79)
+Small alloc test #83 (memory, time) - (8192, 120)
+Small alloc test #84 (memory, time) - (8192, 76)
+Small alloc test #85 (memory, time) - (8192, 75)
+Small alloc test #86 (memory, time) - (8192, 100)
+Small alloc test #87 (memory, time) - (8192, 79)
+Small alloc test #88 (memory, time) - (8192, 79)
+Small alloc test #89 (memory, time) - (8192, 82)
+Small alloc test #90 (memory, time) - (8192, 125)
+Small alloc test #91 (memory, time) - (8192, 75)
+Small alloc test #92 (memory, time) - (8192, 74)
+Small alloc test #93 (memory, time) - (8192, 103)
+Small alloc test #94 (memory, time) - (8192, 81)
+Small alloc test #95 (memory, time) - (8192, 80)
+Small alloc test #96 (memory, time) - (8192, 128)
+Small alloc test #97 (memory, time) - (8192, 76)
+Small alloc test #98 (memory, time) - (8192, 75)
+Small alloc test #99 (memory, time) - (8192, 74)
+Small alloc test #100 (memory, time) - (8192, 74)
+Allocating 84359 * 50 chunks 100 times with stragety 4
+Big alloc test #1 (memory, time) - (4300800, 1872)
+Big alloc test #2 (memory, time) - (4300800, 1739)
+Big alloc test #3 (memory, time) - (4300800, 2084)
+Big alloc test #4 (memory, time) - (4300800, 1862)
+Big alloc test #5 (memory, time) - (4300800, 1883)
+Big alloc test #6 (memory, time) - (4300800, 1813)
+Big alloc test #7 (memory, time) - (4300800, 2024)
+Big alloc test #8 (memory, time) - (4300800, 1786)
+Big alloc test #9 (memory, time) - (4300800, 1921)
+Big alloc test #10 (memory, time) - (4300800, 1827)
+Big alloc test #11 (memory, time) - (4300800, 2074)
+Big alloc test #12 (memory, time) - (4300800, 1963)
+Big alloc test #13 (memory, time) - (4300800, 2003)
+Big alloc test #14 (memory, time) - (4300800, 1979)
+Big alloc test #15 (memory, time) - (4300800, 1784)
+Big alloc test #16 (memory, time) - (4300800, 1944)
+Big alloc test #17 (memory, time) - (4300800, 1922)
+Big alloc test #18 (memory, time) - (4300800, 2076)
+Big alloc test #19 (memory, time) - (4300800, 1908)
+Big alloc test #20 (memory, time) - (4300800, 2075)
+Big alloc test #21 (memory, time) - (4300800, 1951)
+Big alloc test #22 (memory, time) - (4300800, 1952)
+Big alloc test #23 (memory, time) - (4300800, 2030)
+Big alloc test #24 (memory, time) - (4300800, 1692)
+Big alloc test #25 (memory, time) - (4300800, 1779)
+Big alloc test #26 (memory, time) - (4300800, 1755)
+Big alloc test #27 (memory, time) - (4300800, 1954)
+Big alloc test #28 (memory, time) - (4300800, 1685)
+Big alloc test #29 (memory, time) - (4300800, 1702)
+Big alloc test #30 (memory, time) - (4300800, 1696)
+Big alloc test #31 (memory, time) - (4300800, 2087)
+Big alloc test #32 (memory, time) - (4300800, 1648)
+Big alloc test #33 (memory, time) - (4300800, 1657)
+Big alloc test #34 (memory, time) - (4300800, 2208)
+Big alloc test #35 (memory, time) - (4300800, 1644)
+Big alloc test #36 (memory, time) - (4300800, 1710)
+Big alloc test #37 (memory, time) - (4300800, 1842)
+Big alloc test #38 (memory, time) - (4300800, 2036)
+Big alloc test #39 (memory, time) - (4300800, 1723)
+Big alloc test #40 (memory, time) - (4300800, 1732)
+Big alloc test #41 (memory, time) - (4300800, 2052)
+Big alloc test #42 (memory, time) - (4300800, 1799)
+Big alloc test #43 (memory, time) - (4300800, 2008)
+Big alloc test #44 (memory, time) - (4300800, 1917)
+Big alloc test #45 (memory, time) - (4300800, 1872)
+Big alloc test #46 (memory, time) - (4300800, 1869)
+Big alloc test #47 (memory, time) - (4300800, 1913)
+Big alloc test #48 (memory, time) - (4300800, 1868)
+Big alloc test #49 (memory, time) - (4300800, 2044)
+Big alloc test #50 (memory, time) - (4300800, 1861)
+Big alloc test #51 (memory, time) - (4300800, 2082)
+Big alloc test #52 (memory, time) - (4300800, 1833)
+Big alloc test #53 (memory, time) - (4300800, 2010)
+Big alloc test #54 (memory, time) - (4300800, 1985)
+Big alloc test #55 (memory, time) - (4300800, 2002)
+Big alloc test #56 (memory, time) - (4300800, 1707)
+Big alloc test #57 (memory, time) - (4300800, 1806)
+Big alloc test #58 (memory, time) - (4300800, 1644)
+Big alloc test #59 (memory, time) - (4300800, 1750)
+Big alloc test #60 (memory, time) - (4300800, 1662)
+Big alloc test #61 (memory, time) - (4300800, 1817)
+Big alloc test #62 (memory, time) - (4300800, 1672)
+Big alloc test #63 (memory, time) - (4300800, 2085)
+Big alloc test #64 (memory, time) - (4300800, 1640)
+Big alloc test #65 (memory, time) - (4300800, 1741)
+Big alloc test #66 (memory, time) - (4300800, 1644)
+Big alloc test #67 (memory, time) - (4300800, 2122)
+Big alloc test #68 (memory, time) - (4300800, 1691)
+Big alloc test #69 (memory, time) - (4300800, 1727)
+Big alloc test #70 (memory, time) - (4300800, 2011)
+Big alloc test #71 (memory, time) - (4300800, 1729)
+Big alloc test #72 (memory, time) - (4300800, 1746)
+Big alloc test #73 (memory, time) - (4300800, 1745)
+Big alloc test #74 (memory, time) - (4300800, 1762)
+Big alloc test #75 (memory, time) - (4300800, 2002)
+Big alloc test #76 (memory, time) - (4300800, 1803)
+Big alloc test #77 (memory, time) - (4300800, 1821)
+Big alloc test #78 (memory, time) - (4300800, 1866)
+Big alloc test #79 (memory, time) - (4300800, 1981)
+Big alloc test #80 (memory, time) - (4300800, 1886)
+Big alloc test #81 (memory, time) - (4300800, 1973)
+Big alloc test #82 (memory, time) - (4300800, 1919)
+Big alloc test #83 (memory, time) - (4300800, 2075)
+Big alloc test #84 (memory, time) - (4300800, 1919)
+Big alloc test #85 (memory, time) - (4300800, 2157)
+Big alloc test #86 (memory, time) - (4300800, 1977)
+Big alloc test #87 (memory, time) - (4300800, 1844)
+Big alloc test #88 (memory, time) - (4300800, 1837)
+Big alloc test #89 (memory, time) - (4300800, 1812)
+Big alloc test #90 (memory, time) - (4300800, 1915)
+Big alloc test #91 (memory, time) - (4300800, 1777)
+Big alloc test #92 (memory, time) - (4300800, 1901)
+Big alloc test #93 (memory, time) - (4300800, 1724)
+Big alloc test #94 (memory, time) - (4300800, 1725)
+Big alloc test #95 (memory, time) - (4300800, 2170)
+Big alloc test #96 (memory, time) - (4300800, 1654)
+Big alloc test #97 (memory, time) - (4300800, 2134)
+Big alloc test #98 (memory, time) - (4300800, 1626)
+Big alloc test #99 (memory, time) - (4300800, 1690)
+Big alloc test #100 (memory, time) - (4300800, 2042)
+Allocating 250 chunks between [1 and 50000] 100 times with stragety 4 and seed 1717523
+Random alloc test #1 (memory, time) - (12288000, 11366)
+Random alloc test #2 (memory, time) - (8192000, 12259)
+Random alloc test #3 (memory, time) - (5120000, 10916)
+Random alloc test #4 (memory, time) - (4096000, 12422)
+Random alloc test #5 (memory, time) - (11264000, 10453)
+Random alloc test #6 (memory, time) - (5120000, 11332)
+Random alloc test #7 (memory, time) - (3072000, 10536)
+Random alloc test #8 (memory, time) - (5120000, 10898)
+Random alloc test #9 (memory, time) - (131072, 1404)
+Random alloc test #10 (memory, time) - (512000, 4432)
+Random alloc test #11 (memory, time) - (6144000, 11397)
+Random alloc test #12 (memory, time) - (6144000, 10626)
+Random alloc test #13 (memory, time) - (258048, 2530)
+Random alloc test #14 (memory, time) - (6144000, 10352)
+Random alloc test #15 (memory, time) - (28672, 495)
+Random alloc test #16 (memory, time) - (4096000, 11301)
+Random alloc test #17 (memory, time) - (2048000, 10645)
+Random alloc test #18 (memory, time) - (7168000, 10983)
+Random alloc test #19 (memory, time) - (6144000, 11150)
+Random alloc test #20 (memory, time) - (6144000, 10674)
+Random alloc test #21 (memory, time) - (11264000, 11187)
+Random alloc test #22 (memory, time) - (11264000, 10274)
+Random alloc test #23 (memory, time) - (11264000, 10494)
+Random alloc test #24 (memory, time) - (6144000, 10354)
+Random alloc test #25 (memory, time) - (9216000, 11158)
+Random alloc test #26 (memory, time) - (12288000, 12498)
+Random alloc test #27 (memory, time) - (512000, 4422)
+Random alloc test #28 (memory, time) - (10240000, 11468)
+Random alloc test #29 (memory, time) - (6144000, 10857)
+Random alloc test #30 (memory, time) - (4096000, 8765)
+Random alloc test #31 (memory, time) - (9216000, 10632)
+Random alloc test #32 (memory, time) - (6144000, 11119)
+Random alloc test #33 (memory, time) - (4096000, 11835)
+Random alloc test #34 (memory, time) - (7168000, 11288)
+Random alloc test #35 (memory, time) - (12288000, 11337)
+Random alloc test #36 (memory, time) - (5120000, 10875)
+Random alloc test #37 (memory, time) - (2048000, 10611)
+Random alloc test #38 (memory, time) - (344064, 3182)
+Random alloc test #39 (memory, time) - (13312000, 11370)
+Random alloc test #40 (memory, time) - (9216000, 11626)
+Random alloc test #41 (memory, time) - (9216000, 10555)
+Random alloc test #42 (memory, time) - (8192000, 13053)
+Random alloc test #43 (memory, time) - (4096000, 12254)
+Random alloc test #44 (memory, time) - (7168000, 11453)
+Random alloc test #45 (memory, time) - (12288000, 12165)
+Random alloc test #46 (memory, time) - (5120000, 11186)
+Random alloc test #47 (memory, time) - (11264000, 10124)
+Random alloc test #48 (memory, time) - (7168000, 10906)
+Random alloc test #49 (memory, time) - (8192000, 12458)
+Random alloc test #50 (memory, time) - (10240000, 10764)
+Random alloc test #51 (memory, time) - (10240000, 11385)
+Random alloc test #52 (memory, time) - (7168000, 11292)
+Random alloc test #53 (memory, time) - (4096000, 11436)
+Random alloc test #54 (memory, time) - (2048000, 10652)
+Random alloc test #55 (memory, time) - (5120000, 10388)
+Random alloc test #56 (memory, time) - (5120000, 10555)
+Random alloc test #57 (memory, time) - (7168000, 10827)
+Random alloc test #58 (memory, time) - (8192000, 13103)
+Random alloc test #59 (memory, time) - (12288000, 11507)
+Random alloc test #60 (memory, time) - (5120000, 10620)
+Random alloc test #61 (memory, time) - (49152, 474)
+Random alloc test #62 (memory, time) - (7168000, 10372)
+Random alloc test #63 (memory, time) - (13312000, 10678)
+Random alloc test #64 (memory, time) - (9216000, 11136)
+Random alloc test #65 (memory, time) - (5120000, 11163)
+Random alloc test #66 (memory, time) - (9216000, 10644)
+Random alloc test #67 (memory, time) - (6144000, 10233)
+Random alloc test #68 (memory, time) - (8192000, 11990)
+Random alloc test #69 (memory, time) - (9216000, 10770)
+Random alloc test #70 (memory, time) - (11264000, 11846)
+Random alloc test #71 (memory, time) - (8192000, 12970)
+Random alloc test #72 (memory, time) - (11264000, 10636)
+Random alloc test #73 (memory, time) - (11264000, 10440)
+Random alloc test #74 (memory, time) - (4096000, 11444)
+Random alloc test #75 (memory, time) - (8192000, 12040)
+Random alloc test #76 (memory, time) - (11264000, 12049)
+Random alloc test #77 (memory, time) - (7168000, 11685)
+Random alloc test #78 (memory, time) - (2048000, 10685)
+Random alloc test #79 (memory, time) - (7168000, 11020)
+Random alloc test #80 (memory, time) - (7168000, 10373)
+Random alloc test #81 (memory, time) - (3072000, 10265)
+Random alloc test #82 (memory, time) - (2048000, 11108)
+Random alloc test #83 (memory, time) - (8192000, 12818)
+Random alloc test #84 (memory, time) - (5120000, 11207)
+Random alloc test #85 (memory, time) - (12288000, 11375)
+Random alloc test #86 (memory, time) - (2048000, 10452)
+Random alloc test #87 (memory, time) - (512000, 4440)
+Random alloc test #88 (memory, time) - (10240000, 11040)
+Random alloc test #89 (memory, time) - (8192000, 12277)
+Random alloc test #90 (memory, time) - (172032, 1825)
+Random alloc test #91 (memory, time) - (7168000, 11544)
+Random alloc test #92 (memory, time) - (7168000, 10524)
+Random alloc test #93 (memory, time) - (7168000, 10669)
+Random alloc test #94 (memory, time) - (10240000, 10955)
+Random alloc test #95 (memory, time) - (12288000, 12561)
+Random alloc test #96 (memory, time) - (8192000, 13051)
+Random alloc test #97 (memory, time) - (3072000, 10926)
+Random alloc test #98 (memory, time) - (10240000, 10801)
+Random alloc test #99 (memory, time) - (4096000, 11408)
+Random alloc test #100 (memory, time) - (11264000, 10719)
+
+
+
+
+Resultat av korrekthetstester:
+
+gcc node.c malloc.c tstmalloc.c -DSTRATEGY=1
+
+./a.out, line 19: -- Test malloc() for unusual situations
+./a.out, line 21: Allocate small block of 17 bytes 
+./a.out, line 25: Write on allocated block
+./a.out, line 28: Allocate big block of 4711 bytes
+./a.out, line 32: Write on allocated block
+./a.out, line 34: Free big block
+./a.out, line 37: Free small block
+./a.out, line 40: Free NULL
+./a.out, line 43: Allocate zero
+./a.out, line 47: Free pointer from malloc(0)
+./a.out, line 50: Test alignment for double
+
+gcc node.c malloc.c tstmerge.c -DSTRATEGY=1
+
+-- Testing merging of deallocated large blocks ( >= 16384 bytes)
+Test passed OK
+
+gcc node.c malloc.c tstrealloc.c -DSTRATEGY=1
+
+./a.out, line 17: -- Test realloc() for unusual situations
+./a.out, line 19: Allocate 17 bytes with realloc(NULL, 17)
+./a.out, line 24: Write on allocated block
+./a.out, line 26: Increase block size with realloc(., 4711)
+./a.out, line 33: Write on allocated block
+./a.out, line 35: Decrease block size with realloc(., 17)
+./a.out, line 40: Decreased block size
+./a.out, line 43: Free block with realloc(., 0)
+./a.out, line 46: realloc(p, 0) returns non null pointer
+./a.out, line 49: Free pointer allocated with realloc(NULL, 0)
+
+gcc node.c malloc.c tstmemory.c -DSTRATEGY=1
+
+./a.out, line 23: -- This test will search for memory leaks
+./a.out, line 24: At most 3.0x pages are allocated and recycled
+./a.out: Used memory in test: 0x5000 (= 5.00 * pagesize)
+
+gcc node.c malloc.c tstextreme.c -DSTRATEGY=1
+
+./a.out, line 32: Testing memory utility
+./a.out, line 40: Getting small pieces of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using 2.00 times worst case calculation
+./a.out, line 66: Small memory handled OK
+./a.out, line 69: Getting big blocks of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out, line 88: Allocations versus worst case memory usage:
+./a.out: Using 1.10 times worst case calculation
+./a.out, line 96: Big memory handled OK
+
+gcc node.c malloc.c tstalgorithms.c -DSTRATEGY=1
+
+./a.out, line 69: -- This test checks malloc(), free() and realloc()
+./a.out: Max memory allocated 12111168
+./a.out: Memory consumed 34418688
+
+
+
+
+
+
+gcc node.c malloc.c tstmalloc.c -DSTRATEGY=2
+
+./a.out, line 19: -- Test malloc() for unusual situations
+./a.out, line 21: Allocate small block of 17 bytes 
+./a.out, line 25: Write on allocated block
+./a.out, line 28: Allocate big block of 4711 bytes
+./a.out, line 32: Write on allocated block
+./a.out, line 34: Free big block
+./a.out, line 37: Free small block
+./a.out, line 40: Free NULL
+./a.out, line 43: Allocate zero
+./a.out, line 47: Free pointer from malloc(0)
+./a.out, line 50: Test alignment for double
+
+gcc node.c malloc.c tstmerge.c -DSTRATEGY=2
+
+-- Testing merging of deallocated large blocks ( >= 16384 bytes)
+Test passed OK
+
+gcc node.c malloc.c tstrealloc.c -DSTRATEGY=2
+
+./a.out, line 17: -- Test realloc() for unusual situations
+./a.out, line 19: Allocate 17 bytes with realloc(NULL, 17)
+./a.out, line 24: Write on allocated block
+./a.out, line 26: Increase block size with realloc(., 4711)
+./a.out, line 33: Write on allocated block
+./a.out, line 35: Decrease block size with realloc(., 17)
+./a.out, line 40: Decreased block size
+./a.out, line 43: Free block with realloc(., 0)
+./a.out, line 46: realloc(p, 0) returns non null pointer
+./a.out, line 49: Free pointer allocated with realloc(NULL, 0)
+./a.out, line 23: -- This test will search for memory leaks
+./a.out, line 24: At most 3.0x pages are allocated and recycled
+./a.out: Used memory in test: 0x5000 (= 5.00 * pagesize)
+
+gcc node.c malloc.c tstextreme.c -DSTRATEGY=2
+
+./a.out, line 32: Testing memory utility
+./a.out, line 40: Getting small pieces of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using 2.00 times worst case calculation
+./a.out, line 66: Small memory handled OK
+./a.out, line 69: Getting big blocks of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out, line 88: Allocations versus worst case memory usage:
+./a.out: Using 1.10 times worst case calculation
+./a.out, line 96: Big memory handled OK
+
+gcc node.c malloc.c tstalgorithms.c -DSTRATEGY=2
+
+./a.out, line 69: -- This test checks malloc(), free() and realloc()
+./a.out: Max memory allocated 12212480
+./a.out: Memory consumed 35057664
+
+
+
+
+
+
+gcc node.c malloc.c tstmalloc.c -DSTRATEGY=3
+
+./a.out, line 19: -- Test malloc() for unusual situations
+./a.out, line 21: Allocate small block of 17 bytes 
+./a.out, line 25: Write on allocated block
+./a.out, line 28: Allocate big block of 4711 bytes
+./a.out, line 32: Write on allocated block
+./a.out, line 34: Free big block
+./a.out, line 37: Free small block
+./a.out, line 40: Free NULL
+./a.out, line 43: Allocate zero
+./a.out, line 47: Free pointer from malloc(0)
+./a.out, line 50: Test alignment for double
+
+gcc node.c malloc.c tstmerge.c -DSTRATEGY=3
+
+-- Testing merging of deallocated large blocks ( >= 16384 bytes)
+Test passed OK
+
+gcc node.c malloc.c tstrealloc.c -DSTRATEGY=3
+
+./a.out, line 17: -- Test realloc() for unusual situations
+./a.out, line 19: Allocate 17 bytes with realloc(NULL, 17)
+./a.out, line 24: Write on allocated block
+./a.out, line 26: Increase block size with realloc(., 4711)
+./a.out, line 33: Write on allocated block
+./a.out, line 35: Decrease block size with realloc(., 17)
+./a.out, line 40: Decreased block size
+./a.out, line 43: Free block with realloc(., 0)
+./a.out, line 46: realloc(p, 0) returns non null pointer
+./a.out, line 49: Free pointer allocated with realloc(NULL, 0)
+
+gcc node.c malloc.c tstmemory.c -DSTRATEGY=3
+
+./a.out, line 23: -- This test will search for memory leaks
+./a.out, line 24: At most 3.0x pages are allocated and recycled
+./a.out: Used memory in test: 0x5000 (= 5.00 * pagesize)
+
+gcc node.c malloc.c tstextreme.c -DSTRATEGY=3
+
+./a.out, line 32: Testing memory utility
+./a.out, line 40: Getting small pieces of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using 2.00 times worst case calculation
+./a.out, line 66: Small memory handled OK
+./a.out, line 69: Getting big blocks of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out, line 88: Allocations versus worst case memory usage:
+./a.out: Using 1.10 times worst case calculation
+./a.out, line 96: Big memory handled OK
+
+gcc node.c malloc.c tstalgorithms.c -DSTRATEGY=3
+
+./a.out, line 69: -- This test checks malloc(), free() and realloc()
+./a.out: Max memory allocated 11877864
+./a.out: Memory consumed 35332096
+
+
+
+
+
+
+
+gcc node.c malloc.c tstmalloc.c -DSTRATEGY=4 -DNRQUICKLISTS=6
+
+./a.out, line 19: -- Test malloc() for unusual situations
+./a.out, line 21: Allocate small block of 17 bytes 
+./a.out, line 25: Write on allocated block
+./a.out, line 28: Allocate big block of 4711 bytes
+./a.out, line 32: Write on allocated block
+./a.out, line 34: Free big block
+./a.out, line 37: Free small block
+./a.out, line 40: Free NULL
+./a.out, line 43: Allocate zero
+./a.out, line 47: Free pointer from malloc(0)
+./a.out, line 50: Test alignment for double
+
+gcc node.c malloc.c tstmerge.c -DSTRATEGY=4 -DNRQUICKLISTS=6
+
+-- Testing merging of deallocated large blocks ( >= 16384 bytes)
+Test passed OK
+
+gcc node.c malloc.c tstrealloc.c -DSTRATEGY=4 -DNRQUICKLISTS=6
+
+./a.out, line 17: -- Test realloc() for unusual situations
+./a.out, line 19: Allocate 17 bytes with realloc(NULL, 17)
+./a.out, line 24: Write on allocated block
+./a.out, line 26: Increase block size with realloc(., 4711)
+./a.out, line 33: Write on allocated block
+./a.out, line 35: Decrease block size with realloc(., 17)
+./a.out, line 40: Decreased block size
+./a.out, line 43: Free block with realloc(., 0)
+./a.out, line 48: realloc(p, 0) returns null pointer
+./a.out, line 49: Free pointer allocated with realloc(NULL, 0)
+
+gcc node.c malloc.c tstmemory.c -DSTRATEGY=4 -DNRQUICKLISTS=6
+
+./a.out, line 23: -- This test will search for memory leaks
+./a.out, line 24: At most 3.0x pages are allocated and recycled
+./a.out: Used memory in test: 0x6000 (= 6.00 * pagesize)
+
+gcc node.c malloc.c tstextreme.c -DSTRATEGY=4 -DNRQUICKLISTS=6
+
+./a.out, line 32: Testing memory utility
+./a.out, line 40: Getting small pieces of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using total of 0x4000 of memory
+./a.out: Using 2.00 times worst case calculation
+./a.out, line 66: Small memory handled OK
+./a.out, line 69: Getting big blocks of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out: Using total of 0x450000 of memory
+./a.out, line 88: Allocations versus worst case memory usage:
+./a.out: Using 1.10 times worst case calculation
+./a.out, line 96: Big memory handled OK
+
+gcc node.c malloc.c tstalgorithms.c -DSTRATEGY=4 -DNRQUICKLISTS=6
+
+./a.out, line 69: -- This test checks malloc(), free() and realloc()
+./a.out: Max memory allocated 11635408
+./a.out: Memory consumed 13701120
