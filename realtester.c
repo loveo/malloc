@@ -5,8 +5,8 @@
 #include <unistd.h>
 
 
-void startTime(struct timeval*);
-long stopTime(struct timeval);
+void start_time(struct timeval*);
+long stop_time(struct timeval);
 
 int status;
 
@@ -25,36 +25,36 @@ int status;
 #define RANDOM_RANDOM 299
 #define RANDOM_TIMES 100
 
-void startTime(struct timeval*);
-long stopTime(struct timeval);
-void testAll(int);
+void start_time(struct timeval*);
+long stop_time(struct timeval);
+void test_all(int);
 void allocate(int, int, int);
-void allocateSmall(int);
-void allocateBig(int);
-void allocateRandom(int);
-void prettyAllocate(int, int, int, int, int);
+void allocate_small(int);
+void allocate_big(int);
+void allocate_random(int);
+void pretty_allocate(int, int, int, int, int);
 
 #define SEED 15486433
 
 int main(){
-testAll(0);
+test_all(0);
 exit(0);
 }
 
 
 
-void testAll(int strat){
+void test_all(int strat){
  printf("{'strategy':%d,'tests':[",strat);
- allocateSmall(strat);
+ allocate_small(strat);
  printf(",");
- allocateBig(strat);
+ allocate_big(strat);
  printf(",");
- allocateRandom(strat);
+ allocate_random(strat);
  printf("]}");
  fflush(stdout);
 }
 
-void prettyAllocate(int times, int chunks, int strat, int lower, int random){
+void pretty_allocate(int times, int chunks, int strat, int lower, int random){
 int i;
 printf("{'lowerBound':%d,'upperBound':%d,'data':[",lower,lower+random);
 fflush(stdout);
@@ -67,64 +67,64 @@ printf("]}");
 fflush(stdout);
 }
 
-void allocateSmall(int strat){
-	prettyAllocate(SMALL_TIMES, SMALL_NUMBERS, strat, SMALL_SIZE, SMALL_RANDOM);
+void allocate_small(int strat){
+	pretty_allocate(SMALL_TIMES, SMALL_NUMBERS, strat, SMALL_SIZE, SMALL_RANDOM);
 }
 
-void allocateBig(int strat){
-	prettyAllocate(BIG_TIMES, BIG_NUMBERS, strat, BIG_SIZE, BIG_RANDOM);
+void allocate_big(int strat){
+	pretty_allocate(BIG_TIMES, BIG_NUMBERS, strat, BIG_SIZE, BIG_RANDOM);
 }
 
-void allocateRandom(int strat){
-	prettyAllocate(RANDOM_TIMES, RANDOM_NUMBERS, strat, RANDOM_SIZE, RANDOM_RANDOM);
+void allocate_random(int strat){
+	pretty_allocate(RANDOM_TIMES, RANDOM_NUMBERS, strat, RANDOM_SIZE, RANDOM_RANDOM);
 }
 
-void allocate(int minSize, int randomSize, int cc){
+void allocate(int min_size, int random_size, int cc){
 
 if(fork() == 0){
 void * ptrs[cc];
 int i;
 struct timeval tv;
-long timePassed;
+long time_passed;
 int seed = SEED;
-void *startHeap = sbrk(0);
-void *endHeap = startHeap;
-int chunkSize;
-startTime(&tv);
+void *start_heap = sbrk(0);
+void *end_heap = start_heap;
+int chunk_size;
+start_time(&tv);
 
 for(i = 0; i < cc; ++i){
- chunkSize = minSize + rand_r(&seed)%randomSize;
- ptrs[i] = malloc(chunkSize);
+ chunk_size = min_size + rand_r(&seed)%random_size;
+ ptrs[i] = malloc(chunk_size);
 }
 
- if(sbrk(0) > endHeap)
-	endHeap = sbrk(0);
+ if(sbrk(0) > end_heap)
+	end_heap = sbrk(0);
 
 for(i = 0; i < cc; ++i)
  free(ptrs[i]);
 
 for(i = 0; i < cc; ++i){
- chunkSize = minSize + rand_r(&seed)%randomSize;
- ptrs[i] = malloc(chunkSize);
+ chunk_size = min_size + rand_r(&seed)%random_size;
+ ptrs[i] = malloc(chunk_size);
 }
 
- if(sbrk(0) > endHeap)
-	endHeap = sbrk(0);
+ if(sbrk(0) > end_heap)
+	end_heap = sbrk(0);
 for(i = 0; i < cc; ++i){
- chunkSize = minSize + rand_r(&seed)%randomSize;
- ptrs[i] = realloc(ptrs[i], chunkSize);
+ chunk_size = min_size + rand_r(&seed)%random_size;
+ ptrs[i] = realloc(ptrs[i], chunk_size);
 }
- if(sbrk(0) > endHeap)
-	endHeap = sbrk(0);
+ if(sbrk(0) > end_heap)
+	end_heap = sbrk(0);
 
 for(i = 0; i < cc; ++i)
  free(ptrs[i]);
 
 
-timePassed = stopTime(tv);
-startHeap = endHeap - startHeap;
+time_passed = stop_time(tv);
+start_heap = end_heap - start_heap;
 
-printf("{'memory':%d,'time':%d}",(unsigned) startHeap ,timePassed);
+printf("{'memory':%d,'time':%d}",(unsigned) start_heap ,time_passed);
 
 fflush(stdout);
 
@@ -135,19 +135,19 @@ wait(&status);
 }
 
 
-void startTime(struct timeval* tv){
+void start_time(struct timeval* tv){
 
  gettimeofday(tv,NULL);
 }
 
 
-long stopTime(struct timeval oldTv){
+long stop_time(struct timeval old_tv){
 int sec, usec;
 long time;
-struct timeval currTv;
-gettimeofday(&currTv, NULL);
-sec = currTv.tv_sec - oldTv.tv_sec;
-usec = currTv.tv_usec - oldTv.tv_usec;
+struct timeval curr_tv;
+gettimeofday(&curr_tv, NULL);
+sec = curr_tv.tv_sec - old_tv.tv_sec;
+usec = curr_tv.tv_usec - old_tv.tv_usec;
 time = sec*1000000+usec;
 return time;
 

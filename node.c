@@ -3,11 +3,11 @@
 #define META_SIZE sizeof(struct node)
 
 /*Creates a node at the given address with the given size*/
-struct node * newNode(void* address, size_t size){
+struct node * new_node(void* address, size_t size){
 	struct node *p ;
 	p = (struct node*) address;
 	/*Point below the node*/
-	p->chunkPointer = p + 1;
+	p->chunk_pointer = p + 1;
 	p->size = size;
 	p->free = 0; 
 
@@ -15,47 +15,47 @@ struct node * newNode(void* address, size_t size){
 }
 
 /*Adds a node to the end of a list, given its root*/
-void addEnd(struct node* root, struct node* endNode){
+void add_end(struct node* root, struct node* end_node){
 	struct node *current = root;
 	while(current-> next != NULL)current = current->next;
-	current->next = endNode;
-	endNode->prev = current;
-	endNode->next = NULL;
+	current->next = end_node;
+	end_node->prev = current;
+	end_node->next = NULL;
 }
 
 /*Adds a node before a given node*/
-void addHere(struct node* here, struct node* addNode){
+void addHere(struct node* here, struct node* add_node){
 	if(here->prev != NULL)
-	here->prev->next = addNode;
-	addNode->prev = here->prev;
-	here->prev = addNode;
-	addNode->next = here;
+	here->prev->next = add_node;
+	add_node->prev = here->prev;
+	here->prev = add_node;
+	add_node->next = here;
 }
 
 /*Adds a node after a given node*/
-void addAfter(struct node* here, struct node* addNode){
+void add_after(struct node* here, struct node* add_node){
 	if(here->next == NULL){
-		here->next = addNode;
-		addNode->prev = here;
-		addNode->next = NULL;
+		here->next = add_node;
+		add_node->prev = here;
+		add_node->next = NULL;
 	}else{
-		addNode->next = here->next;
-		addNode->prev = here;
-		here->next->prev = addNode;
-		here->next = addNode;
+		add_node->next = here->next;
+		add_node->prev = here;
+		here->next->prev = add_node;
+		here->next = add_node;
 	}
 }
 
 /*Adds a node first in a list, given its root*/
-struct node* addFirst(struct node* root, struct node* addNode){
-	root->prev = addNode;
-	addNode->next = root;
-	addNode->prev = NULL;
-	return addNode;
+struct node* addFirst(struct node* root, struct node* add_node){
+	root->prev = add_node;
+	add_node->next = root;
+	add_node->prev = NULL;
+	return add_node;
 }
 
 /*Removes the next node given a node*/
-void removeNext(struct node* here){
+void remove_next(struct node* here){
 	struct node* next = here->next;
 	if(here->next == NULL) return;
 
@@ -71,7 +71,7 @@ void removeNext(struct node* here){
 }
 
 /*Removes the first node, given the root*/
-struct node* removeFirst(struct node* root){
+struct node* remove_first(struct node* root){
 	struct node* temp;
 	if(root->next == NULL) return NULL;
 

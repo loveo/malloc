@@ -5,8 +5,8 @@
 #include <unistd.h>
 
 
-void startTime(struct timeval*);
-long stopTime(struct timeval);
+void start_time(struct timeval*);
+long stop_time(struct timeval);
 
 int status;
 
@@ -23,14 +23,14 @@ int status;
 #define RANDOM_NUMBERS 250
 #define RANDOM_TIMES 100
 
-void startTime(struct timeval*);
-long stopTime(struct timeval);
+void start_time(struct timeval*);
+long stop_time(struct timeval);
 void testStrategy(void);
-void testAll(int);
+void test_all(int);
 void allocate(int, int, int, int, char*);
-void allocateSmall(int);
-void allocateBig(int);
-void allocateRandom(int, int);
+void allocate_small(int);
+void allocate_big(int);
+void allocate_random(int, int);
 
 int main(){
 
@@ -44,18 +44,18 @@ exit(0);
 void testStrategy(){
 int i;
 for(i = 1; i <= 1; ++i){
- testAll(i);
+ test_all(i);
 }
 }
 
-void testAll(int strat){
- allocateSmall(strat);
- allocateBig(strat);
- allocateRandom(strat, 1717523);
+void test_all(int strat){
+ allocate_small(strat);
+ allocate_big(strat);
+ allocate_random(strat, 1717523);
 }
 
 
-void allocateSmall(int strat){
+void allocate_small(int strat){
 int i;
 printf("Allocating %d * %d chunks %d times\n",SMALL_SIZE, SMALL_NUMBERS, SMALL_TIMES);
 fflush(stdout);
@@ -64,7 +64,7 @@ for(i = 1; i<= SMALL_TIMES; ++i)
 
 }
 
-void allocateBig(int strat){
+void allocate_big(int strat){
 int i;
 printf("Allocating %d * %d chunks %d timesn",BIG_SIZE, BIG_NUMBERS, BIG_TIMES);
 fflush(stdout);
@@ -73,18 +73,18 @@ for(i = 1; i<= BIG_TIMES; ++i)
 
 }
 
-void allocateRandom(int strat, int seed){
+void allocate_random(int strat, int seed){
 int i;
 int rand;
 
 printf("Allocating %d chunks between [%d and %d] %d times with seed %d\n",RANDOM_NUMBERS,SMALLEST_RANDOM, BIGGEST_RANDOM, RANDOM_TIMES, seed);
 fflush(stdout);
 for(i = 1; i <= RANDOM_TIMES; ++i){
- int chunkSize;
+ int chunk_size;
  rand = rand_r(&seed);
- chunkSize = rand%(BIGGEST_RANDOM - SMALLEST_RANDOM);
- chunkSize += SMALLEST_RANDOM; 
- allocate(chunkSize, RANDOM_NUMBERS, i, strat, "Random alloc test");
+ chunk_size = rand%(BIGGEST_RANDOM - SMALLEST_RANDOM);
+ chunk_size += SMALLEST_RANDOM; 
+ allocate(chunk_size, RANDOM_NUMBERS, i, strat, "Random alloc test");
 }
 
 }
@@ -95,16 +95,16 @@ if(fork() == 0){
 void * ptrs[cc];
 int i;
 struct timeval tv;
-long timePassed;
+long time_passed;
 void * memStart = sbrk(0);
-startTime(&tv);
+start_time(&tv);
 for(i = 0; i < cc; ++i)
  ptrs[i] = malloc(cs);
 
 
-timePassed = stopTime(tv);
+time_passed = stop_time(tv);
 
-printf("%s #%d (memory, time) - (%d, %d)\n",print, iter,sbrk(0)-memStart ,timePassed);
+printf("%s #%d (memory, time) - (%d, %d)\n",print, iter,sbrk(0)-memStart ,time_passed);
 
 fflush(stdout);
 
@@ -115,19 +115,19 @@ wait(&status);
 }
 
 
-void startTime(struct timeval* tv){
+void start_time(struct timeval* tv){
 
  gettimeofday(tv,NULL);
 }
 
 
-long stopTime(struct timeval oldTv){
+long stop_time(struct timeval old_tv){
 int sec, usec;
 long time;
-struct timeval currTv;
-gettimeofday(&currTv, NULL);
-sec = currTv.tv_sec - oldTv.tv_sec;
-usec = currTv.tv_usec - oldTv.tv_usec;
+struct timeval curr_tv;
+gettimeofday(&curr_tv, NULL);
+sec = curr_tv.tv_sec - old_tv.tv_sec;
+usec = curr_tv.tv_usec - old_tv.tv_usec;
 time = sec*1000000+usec;
 return time;
 

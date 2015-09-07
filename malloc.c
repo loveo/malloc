@@ -5,52 +5,52 @@
 #include <string.h>
 
 struct node* list = NULL;
-void *breakAddress = 0;
+void *break_address = 0;
 int SMALLEST_QUICK = 8;
 
 #define META_SIZE sizeof(struct node)
 #define make4(x) (((((x)-1)/4)*4)+4)
 
 #ifndef STRATEGY
-int STRATEGY = 4;
+	int STRATEGY = 4;
 #endif
 
 #ifdef NRQUICKLISTS
-int QUICK_STEPS = NRQUICKLISTS;
+	int QUICK_STEPS = NRQUICKLISTS;
 
-#define BIGGEST_QUICK (SMALLEST_QUICK << (QUICK_STEPS-1))
-struct node* quickList[NRQUICKLISTS];
+	#define BIGGEST_QUICK (SMALLEST_QUICK << (QUICK_STEPS-1))
+	struct node* quick_list[NRQUICKLISTS];
 #endif
 
 #ifndef NRQUICKLISTS
-int BIGGEST_QUICK = 128;
-int  QUICK_STEPS =  5;
-struct node* quickList[5];
+	int BIGGEST_QUICK = 128;
+	int QUICK_STEPS =  5;
+	struct node* quick_list[5];
 #endif
 
-void quickCut(struct node*, size_t);
-size_t pageRoundUp(size_t);
-void *chooseAndCut(struct node*, size_t);
-struct node* getQuickNode(size_t);
-struct node* createMemory(size_t);
-void concatNodes(struct node*);
-void concatNext(struct node*);
-void *firstMalloc(size_t);
-void *worstMalloc(size_t);
-void *bestMalloc(size_t);
-void *quickMalloc(size_t);
-void *quickRealloc(void*, size_t);
-void addToQuickList(struct node*);
-size_t roundUp(size_t);
-void *getChunkPointer(struct node*);
+void quick_cut(struct node*, size_t);
+size_t page_round_up(size_t);
+void *choose_and_cut(struct node*, size_t);
+struct node* get_quick_node(size_t);
+struct node* create_memory(size_t);
+void concat_nodes(struct node*);
+void concat_next(struct node*);
+void *first_malloc(size_t);
+void *worst_malloc(size_t);
+void *best_malloc(size_t);
+void *quick_malloc(size_t);
+void *quick_realloc(void*, size_t);
+void add_to_quick_list(struct node*);
+size_t round_up(size_t);
+void *get_chunk_pointer(struct node*);
 void copy(struct node*, struct node*);
-int isQuickChunk(size_t);
-void quickConcat(struct node*);
+int is_quick_chunk(size_t);
+void quick_concat(struct node*);
 
 /*Returns the break point of the heap*/
-void * endHeap(void){
-	if(breakAddress == 0) breakAddress = sbrk(0);
-	return breakAddress;
+void * end_heap(void){
+	if(break_address == 0) break_address = sbrk(0);
+	return break_address;
 }
 
 /*Allocates a pointer to a chunk of the given size*/
@@ -60,10 +60,10 @@ void *malloc(size_t size){
 	size = make4(size);
 	/*Check what strategy should be used*/
 	switch(STRATEGY){
-		case 1: return firstMalloc(size);
-		case 2: return bestMalloc(size);
-		case 3: return worstMalloc(size);
-		case 4: return quickMalloc(size);
+		case 1: return first_malloc(size);
+		case 2: return best_malloc(size);
+		case 3: return worst_malloc(size);
+		case 4: return quick_malloc(size);
 	}
 	return NULL;
 }
@@ -77,27 +77,27 @@ void free(void *pointer){
 		/*Get the node containing the chunk*/
 		struct node* node = ((struct node*) pointer-1);
 		/*If this pointer wasn't given by malloc, ignore it since we can't free it*/
-		if(node->chunkPointer != pointer) return;
+		if(node->chunk_pointer != pointer) return;
 
 		/*If node is a 'Quick Node' treat it specially*/
 		if(node->size <= BIGGEST_QUICK){
 			if((node->size & (node->size -1)) == 0){
-				addToQuickList(node);
+				add_to_quick_list(node);
 				return;
 			}
 		}
 		/*If not, set free flag as free*/
 		node->free = 1;
-		quickConcat(node);
+		quick_concat(node);
 	}else{/*If Quick Fit is not used*/
 		/*Get the node containing the chunk*/
 		struct node* node = ((struct node*)pointer-1);
 		/*If this pointer wasn't given by malloc, ignore it*/
-		if(node->chunkPointer != pointer) return;
+		if(node->chunk_pointer != pointer) return;
 		/*Set the node as free*/
 		node->free = 1;
 		/*Try to merge this node with neighbours*/
-		concatNodes(node);
+		concat_nodes(node);
 	}
 }
 
@@ -111,39 +111,39 @@ void *realloc(void *pointer, size_t size){
 	size = make4(size);
 
 	/*If Quick Fit is used, use another realloc method instead*/
-	if(STRATEGY == 4) return quickRealloc(pointer, size);
+	if(STRATEGY == 4) return quick_realloc(pointer, size);
 	/*Get node containing this chunk*/
 	node = ((struct node*)pointer-1);
 	/*If this pointer points to a chunk given by malloc*/
-	if(node->chunkPointer == pointer){
+	if(node->chunk_pointer == pointer){
 		/*If the old size is equal to the wanted, return the old chunk*/
-		if(node->size == size) return node->chunkPointer;
+		if(node->size == size) return node->chunk_pointer;
 		/*If the old node is too large*/
 		if(node->size >= size){
 			/*Check if there is a point in cutting the old node*/
 			if(node->size - size - META_SIZE - 4 >= 0){
 				/*Return the old node, cutted to the new size*/
-				return chooseAndCut(node, size);
+				return choose_and_cut(node, size);
 			}
 		}else{/*If old node is too small*/
 			/*If next node is free and big enough to hold our wanted size*/
 			if(node->next != NULL && node->next->free && node->size + node->next->size + META_SIZE >= size){
 				/*Merge this node with the next one*/
-				concatNext(node);
+				concat_next(node);
 				/*If the newly merged node is worth cutting*/
 				if(node->size - size - META_SIZE - 4 >= 0){
 					/*Cut the newly merged node to save memory*/
-					chooseAndCut(node, size);
+					choose_and_cut(node, size);
 				}
 			}else{/*If we can't merge with the next node*/
 				/*Create a new node (malloc)*/	 
-				struct node* newPointer = createMemory(size);
+				struct node* new_pointer = create_memory(size);
 				/*If given address was NULL, we are out of memory*/ 
-				if(newPointer == NULL) return NULL;
+				if(new_pointer == NULL) return NULL;
 				/*Copy contents from old node to new node*/
-				copy(node, newPointer);
+				copy(node, new_pointer);
 				/*Return a pointer to the new nodes chunk*/
-				return newPointer->chunkPointer;   
+				return new_pointer->chunk_pointer;   
 			}
 		}
 		return pointer;
@@ -152,17 +152,17 @@ return NULL;
 }
 
 /*Chooses a node to use and tries to cut it to save some memory*/
-void *chooseAndCut(struct node* node, size_t size){
-	struct node* cutNode; 
+void *choose_and_cut(struct node* node, size_t size){
+	struct node* cut_node; 
 	node->free = 0;
 	/*If node is worth cutting*/
 	if(node-> size >= size + META_SIZE + 4){
 		/*Create a new node*/
-		cutNode = newNode(node->chunkPointer + size, node->size - size - META_SIZE);
+		cut_node = new_node(node->chunk_pointer + size, node->size - size - META_SIZE);
 		/*Add the new node after the given node*/
-		addAfter(node, cutNode);
+		add_after(node, cut_node);
 		/*Mark the new node as free*/
-		cutNode->free = 1; 
+		cut_node->free = 1; 
 
 		/*Set the given nodes size to the wanted size*/
 		node->size = size;
@@ -170,75 +170,75 @@ void *chooseAndCut(struct node* node, size_t size){
 		/*If we are using Quick Fit*/
 		if(STRATEGY == 4){
 			/*If the left over size is small enough to fit Quick List*/
-			if(cutNode->size <= BIGGEST_QUICK){
+			if(cut_node->size <= BIGGEST_QUICK){
 				/*If size is 8, 16, 32, 64 etc*/
-				if(cutNode->size & ((cutNode->size -1) == 0)){
+				if(cut_node->size & ((cut_node->size -1) == 0)){
 				    /*Remove the node from the list and add it to the Quick List instead*/
-					node->next = cutNode->next;
-					cutNode->next = NULL;
-					cutNode->prev = NULL;
-					addToQuickList(cutNode);
+					node->next = cut_node->next;
+					cut_node->next = NULL;
+					cut_node->prev = NULL;
+					add_to_quick_list(cut_node);
 				}
 			}
 		} 
-		return node->chunkPointer;
+		return node->chunk_pointer;
 	}
-	return node->chunkPointer;
+	return node->chunk_pointer;
 }
 
 /*Cuts a page into Quick Chunk of a given size*/
-void quickCut(struct node* node, size_t size){
+void quick_cut(struct node* node, size_t size){
 	/*As long as the node can be cut*/
 	while(node->size > size+META_SIZE){
 		/*Create a left over node*/
-		struct node* quickNode = newNode(node->chunkPointer + size, node->size -size-META_SIZE);
+		struct node* quick_node = new_node(node->chunk_pointer + size, node->size -size-META_SIZE);
 		node->size = size;
 		node->next = NULL;
 		node->prev = NULL;
 		/*Add this node to the Quick List*/
-		addToQuickList(node);
+		add_to_quick_list(node);
 		/*Set this node as the left over node*/
-		node = quickNode;
+		node = quick_node;
 	}/*Repeat until a Quick Node can't be cut*/
 
 	/*Add the left over node to the ordinary list*/
 	if(list == NULL)
 		list = node;
 	else
-		addEnd(list, node);
+		add_end(list, node);
 }
 
 /*Creates a memory node of the given size*/
-struct node* createMemory(size_t size){
+struct node* create_memory(size_t size){
 	void* p;
 	/*The size (multiple of page size) of the node*/
-	size_t nodeSize = pageRoundUp(size)*sysconf(_SC_PAGESIZE);
-	breakAddress = endHeap();
+	size_t node_size = page_round_up(size)*sysconf(_SC_PAGESIZE);
+	break_address = end_heap();
 	/*Ask for memory from mmap*/
-	p =  mmap(breakAddress, nodeSize, PROT_WRITE|PROT_READ,MAP_FIXED|MAP_SHARED|MAP_ANONYMOUS, -1,0 );
+	p =  mmap(break_address, node_size, PROT_WRITE|PROT_READ,MAP_FIXED|MAP_SHARED|MAP_ANONYMOUS, -1,0 );
 	/*If an ok pointer was returned*/
 	if(p >= 0){
 		struct node* node;  
 		/*Increase the breakAdress for next mmap*/
-		breakAddress += nodeSize;
+		break_address += node_size;
 		/*Create a node but remove header size from its size*/
-		node = newNode(p, nodeSize-META_SIZE);
+		node = new_node(p, node_size-META_SIZE);
 
 		/*If we are using Quick Fit and node is small enough to fit Quick List*/
 		if(STRATEGY == 4 && size <= BIGGEST_QUICK){
 			/*Cut the node into many Quick Nodes*/
-			quickCut(node, size);
+			quick_cut(node, size);
 			/*Return a free Quick Node*/
-			return getQuickNode(size);  
+			return get_quick_node(size);  
 		}else{/*If not using Quick Fit*/
 			/*Add the node to the free list*/
 			if(list == NULL){
 				list = node;
 			}else{
-				addEnd(list, node);
+				add_end(list, node);
 			}
 			/*Try to cut the node if possible to save memory*/
-			chooseAndCut(node, size);
+			choose_and_cut(node, size);
 		}
 		return node; 
 	}else{/*No memory left*/
@@ -247,17 +247,17 @@ struct node* createMemory(size_t size){
 }
 
 /*Try to merge nodes with neighbours, only used in Quick Fit*/
-void quickConcat(struct node* node){
+void quick_concat(struct node* node){
 	/*If next node is free*/
 	if(node->next != NULL && node->next->free){
 		struct node* next = node->next;
 		/*If next node is not a Quick Node*/
-		if(!isQuickChunk(next->size)){
+		if(!is_quick_chunk(next->size)){
 			/*If next node lies next to this node in the memory*/
-			if(node->chunkPointer + node->size == next){
+			if(node->chunk_pointer + node->size == next){
 				/*Merge nodes and remove next node*/
 				node->size += META_SIZE + next->size;
-				removeNext(node);
+				remove_next(node);
 			}
 		}
 	}
@@ -266,25 +266,25 @@ void quickConcat(struct node* node){
 	if(node->prev != NULL && node->prev->free){
 		struct node* prev = node->prev;
 		/*If prev node is not a Quick Node*/
-		if(!isQuickChunk(prev->size)){
+		if(!is_quick_chunk(prev->size)){
 			/*If prev node lies next to this node in the memory*/
-			if(prev->chunkPointer + prev->size == node){
+			if(prev->chunk_pointer + prev->size == node){
 				/*Merge nodes and remove this node*/
 				prev->size += node->size + META_SIZE;
-				removeNext(prev);
+				remove_next(prev);
 			}
 		}
 	}
 }
 
 /*Try to merge node with neighbouring nodes*/
-void concatNodes(struct node* node){
+void concat_nodes(struct node* node){
 	/*If next node is free*/
 	if(node->next != NULL && node->next->free){
 		struct node* next = node->next;
 		/*Merge nodes and remove next*/
 		node->size += next->size + META_SIZE;
-		removeNext(node);
+		remove_next(node);
 	}
 
 	/*If prev node is free*/
@@ -292,50 +292,50 @@ void concatNodes(struct node* node){
 		struct node* prev = node->prev;
 		/*Merge nodes and remode this node*/
 		prev->size += node->size + META_SIZE;
-		removeNext(prev);
+		remove_next(prev);
 	}
 }
 
 /*Try to merge this node with next node*/
-void concatNext(struct node* node){
+void concat_next(struct node* node){
 	/*If next node is free*/
 	if(node->next != NULL && node->next->free){
 		struct node* next = node->next;
 		/*Merge nodes and remove next node*/
 		node->size += next->size + META_SIZE;
-		removeNext(node);
+		remove_next(node);
 	}
 }
 
 /*Copy data from a node to another*/
 void copy(struct node* from, struct node* to){
-	int *fromData, *toData;
+	int *from_data, *to_data;
 	size_t i;
-	fromData = from->chunkPointer;
-	toData = to->chunkPointer;
+	from_data = from->chunk_pointer;
+	to_data = to->chunk_pointer;
 	/*Copy data until the smallest size have been filled*/
 	for(i = 0; i*4 < from->size && i * 4 < to->size; ++i)
-		toData[i] = fromData[i];
+		to_data[i] = from_data[i];
 }
 
 /*Does malloc according to First Fit algorithm*/
-void *firstMalloc(size_t size){
+void *first_malloc(size_t size){
 	struct node* current = list;
 	/*Searches through the node list*/
 	while(current != NULL){
 		/*If a node is free and big enough*/
 		if(current->free && current->size >= size){
 			/*Cut it if possible and return its address*/
-			return chooseAndCut(current, size); 
+			return choose_and_cut(current, size); 
 		}
 		current = current->next;
 	}
 	/*If no chunk was found, create a new node and return it*/
-	return getChunkPointer(createMemory(size));
+	return get_chunk_pointer(create_memory(size));
 }
 
 /*Does malloc according to Worst Fit algorithm*/
-void *worstMalloc(size_t size){
+void *worst_malloc(size_t size){
 	struct node* current = list;
 	struct node* biggest = NULL;
 	/*Loop through the entire list*/
@@ -353,15 +353,15 @@ void *worstMalloc(size_t size){
 	/*If we didn't find a big enough node*/
 	if(biggest == NULL){
 		/*Create a new node and return it*/
-		return getChunkPointer(createMemory(size));
+		return get_chunk_pointer(create_memory(size));
 	}else{
 		/*Return the biggest node found and cut it if possible*/
-		return chooseAndCut(biggest,size);
+		return choose_and_cut(biggest,size);
 	}
 }
 
 /*Does malloc according to Best Fit algorithm*/
-void *bestMalloc(size_t size){
+void *best_malloc(size_t size){
 	struct node* current = list;
 	struct node* closest = NULL;
 	/*Loop through all nodes*/
@@ -379,63 +379,63 @@ void *bestMalloc(size_t size){
 	/*If no node was found*/
 	if(closest == NULL){
 		/*Create a new node and return it*/
-		return getChunkPointer(createMemory(size));
+		return get_chunk_pointer(create_memory(size));
 	}else{
 		/*Return the smallest node and cut it if possible*/
-		return chooseAndCut(closest, size);
+		return choose_and_cut(closest, size);
 	}
 }
 
 /*Does malloc according to Quick Fit algorithm*/
-void *quickMalloc(size_t size){
+void *quick_malloc(size_t size){
 	/*If the size is small enough to fit in a Quick List*/
 	if(size <= BIGGEST_QUICK){
 		struct node* free;
 		/*Fetches a free node from the Quick List OR creates a new one*/
-		free = getQuickNode(size);
+		free = get_quick_node(size);
 		/*If the pointer is NULL, no memory is left*/
 		if(free == NULL) return NULL;
 		/*Mark this node as not free*/
 		free->free = 0;
 		/*Return the node*/
-		return free->chunkPointer;
-	}else{/*For larger sizes, use firstMalloc*/
-		return firstMalloc(size);
+		return free->chunk_pointer;
+	}else{/*For larger sizes, use first_malloc*/
+		return first_malloc(size);
 	}
 }
 
 /*Realloc used only when Quick Fit is used*/
-void *quickRealloc(void *pointer, size_t size){
+void *quick_realloc(void *pointer, size_t size){
 	struct node* node;
-	struct node* newNode;
+	struct node* new_node;
 	void* p;
 	/*If no pointer was given, retun NULL*/
 	if(pointer == NULL) return NULL;
 	/*Fetch the node holding this chunk*/
 	node = (struct node*) pointer-1;
 	/*If the pointer wasn't allocated by malloc, ignore call*/
-	if(node->chunkPointer != pointer) return NULL;
+	if(node->chunk_pointer != pointer) return NULL;
 	/*If wanted size was old size, return old node*/
-	if(node->size == size) return node->chunkPointer;
+	if(node->size == size) return node->chunk_pointer;
 	/*If new size still fits in the same Quick Node, return old node*/
-	if(node->size >= size && size > node->size/2) return node->chunkPointer;
+	if(node->size >= size && size > node->size/2) return node->chunk_pointer;
 
 	/*Create a new node*/
 	p = malloc(size);
 	/*If pointer is NULL, no memory is left*/
 	if(p == NULL) return NULL;
 	/*Get the node*/
-	newNode = ((struct node*) p-1 ); 
+	new_node = ((struct node*) p-1 ); 
 	/*Copy data from old node to new node*/
-	copy(node, newNode);
+	copy(node, new_node);
 	/*Free the old node*/
-	free(node->chunkPointer);
+	free(node->chunk_pointer);
 	/*Return the new node*/
-	return newNode->chunkPointer;
+	return new_node->chunk_pointer;
 }
 
 /*Add a free Quick Node to the Quick List, only used in Quick Fit*/
-void addToQuickList(struct node* node){
+void add_to_quick_list(struct node* node){
 	int i,  pow = SMALLEST_QUICK;
 	/*Figure out what index this size belongs to*/
 	for(i = 0; i < QUICK_STEPS; ++i){
@@ -443,14 +443,14 @@ void addToQuickList(struct node* node){
 			/*Mark node as free*/
 			node->free = 1;
 			/*If Quick List is empty, use this as the list*/
-			if(quickList[i] == NULL){
+			if(quick_list[i] == NULL){
 				node->next = NULL;
 				node->prev = NULL;
-				quickList[i] = node;
+				quick_list[i] = node;
 			}else{/*Else add this node first in the list*/
 				node->next = NULL;
 				node->prev = NULL;
-				quickList[i] = addFirst(quickList[i],node);
+				quick_list[i] = addFirst(quick_list[i],node);
 			}
 			return;
 		}else{
@@ -460,29 +460,29 @@ void addToQuickList(struct node* node){
 }
 
 /*Get a Quick Node from the Qiuck List OR create a new one if needed*/
-struct node *getQuickNode(size_t size){
-	int i, tempSize = SMALLEST_QUICK;
+struct node *get_quick_node(size_t size){
+	int i, temp_size = SMALLEST_QUICK;
 	/*Figures out what index to use*/
 	for(i = 0; i < QUICK_STEPS; ++i){
-		 if(size <= tempSize){
+		 if(size <= temp_size){
 			/*If the Quick List is empty, create a new node*/
-			if(quickList[i] == NULL){
-				return createMemory(roundUp(size));
+			if(quick_list[i] == NULL){
+				return create_memory(round_up(size));
 			}else{
 				/*Return first node and remove it from the Quick List*/
-				struct node* free = quickList[i];
-				quickList[i] = removeFirst(free);
+				struct node* free = quick_list[i];
+				quick_list[i] = remove_first(free);
 				free->free = 0;
 				return free;
 			}
 		}
-		tempSize *= 2;
+		temp_size *= 2;
 	}
 	return NULL;
 }
 
 /*Rounds a size up to closest Quick Size (16,32, 64.. etc)*/
-size_t roundUp(size_t size){
+size_t round_up(size_t size){
 	int i, temp = SMALLEST_QUICK;
 	for(i = 0; i < QUICK_STEPS; ++i){
 		if(size <= temp) return temp;
@@ -492,19 +492,19 @@ size_t roundUp(size_t size){
 }
 
 /*Returns the correct amount of pages to use to a given size*/
-size_t pageRoundUp(size_t size){
-	long pageSize = sysconf(_SC_PAGESIZE);
-	return ((META_SIZE+size-1)/pageSize)+1;
+size_t page_round_up(size_t size){
+	long page_size = sysconf(_SC_PAGESIZE);
+	return ((META_SIZE+size-1)/page_size)+1;
 }
 
 /*Gets the chunk pointer from a node*/
-void *getChunkPointer(struct node * nodePointer){
-	if(nodePointer == NULL) return NULL;
-	return nodePointer->chunkPointer;
+void *get_chunk_pointer(struct node * node_pointer){
+	if(node_pointer == NULL) return NULL;
+	return node_pointer->chunk_pointer;
 }
 
 /*Checks if a size is a Quick Size*/
-int isQuickChunk(size_t size){
+int is_quick_chunk(size_t size){
 	if(size <= BIGGEST_QUICK)
 		if(size & ((size -1) == 0))
 			return 1;
