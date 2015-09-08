@@ -43,105 +43,105 @@ void pretty_allocate(int, int, int, int, int);
 #define SEED 15486433
 
 int main(){
-  test_all(STRATEGY);
-  exit(0);
+    test_all(STRATEGY);
+    exit(0);
 }
 
 
 void test_all(int strat){
-  printf("{'strategy':%d,'tests':[",strat);
-  allocate_small(strat);
-  printf(",");
-  allocate_big(strat);
-  printf(",");
-  allocate_random(strat);
-  printf("]}");
-  fflush(stdout);
+    printf("{'strategy':%d,'tests':[",strat);
+    allocate_small(strat);
+    printf(",");
+    allocate_big(strat);
+    printf(",");
+    allocate_random(strat);
+    printf("]}");
+    fflush(stdout);
 }
 
 void pretty_allocate(int times, int chunks, int strat, int lower, int random){
-  int i;
-  printf("{'lowerBound':%d,'upperBound':%d,'data':[",lower,lower+random);
-  fflush(stdout);
-  for(i = 1; i<= times; ++i){
-    if(i != 1) printf(",");
+    int i;
+    printf("{'lowerBound':%d,'upperBound':%d,'data':[",lower,lower+random);
     fflush(stdout);
-    allocate(lower,random, chunks);
-  }
-  printf("]}");
-  fflush(stdout);
+    for(i = 1; i<= times; ++i){
+        if(i != 1) printf(",");
+        fflush(stdout);
+        allocate(lower,random, chunks);
+    }
+    printf("]}");
+    fflush(stdout);
 }
 
 void allocate_small(int strat){
-  pretty_allocate(SMALL_TIMES, SMALL_NUMBERS, strat, SMALL_SIZE, SMALL_RANDOM);
+    pretty_allocate(SMALL_TIMES, SMALL_NUMBERS, strat, SMALL_SIZE, SMALL_RANDOM);
 }
 
 void allocate_big(int strat){
-  pretty_allocate(BIG_TIMES, BIG_NUMBERS, strat, BIG_SIZE, BIG_RANDOM);
+    pretty_allocate(BIG_TIMES, BIG_NUMBERS, strat, BIG_SIZE, BIG_RANDOM);
 }
 
 void allocate_random(int strat){
-  pretty_allocate(RANDOM_TIMES, RANDOM_NUMBERS, strat, RANDOM_SIZE, RANDOM_RANDOM);
+    pretty_allocate(RANDOM_TIMES, RANDOM_NUMBERS, strat, RANDOM_SIZE, RANDOM_RANDOM);
 }
 
 void allocate(int min_size, int random_size, int cc){
 
-  if(fork() == 0){
-    void * ptrs[cc];
-    int i;
-    struct timeval tv;
-    long time_passed;
-    int seed = SEED;
-    void *start_heap = end_heap();
-    int chunk_size;
-    start_time(&tv);
+    if(fork() == 0){
+        void * ptrs[cc];
+        int i;
+        struct timeval tv;
+        long time_passed;
+        int seed = SEED;
+        void *start_heap = end_heap();
+        int chunk_size;
+        start_time(&tv);
 
-    for(i = 0; i < cc; ++i){
-      chunk_size = min_size + rand_r(&seed)%random_size;
-      ptrs[i] = malloc(chunk_size);
+        for(i = 0; i < cc; ++i){
+            chunk_size = min_size + rand_r(&seed)%random_size;
+            ptrs[i] = malloc(chunk_size);
+        }
+
+        for(i = 0; i < cc; ++i)
+            free(ptrs[i]);
+
+        for(i = 0; i < cc; ++i){
+            chunk_size = min_size + rand_r(&seed)%random_size;
+            ptrs[i] = malloc(chunk_size);
+        }
+
+        for(i = 0; i < cc; ++i){
+            chunk_size = min_size + rand_r(&seed)%random_size;
+            ptrs[i] = realloc(ptrs[i], chunk_size);
+        }
+
+        for(i = 0; i < cc; ++i)
+            free(ptrs[i]);
+
+
+        time_passed = stop_time(tv);
+        start_heap = end_heap() - (int) start_heap;
+
+        printf("{'memory':%d,'time':%ld}",(unsigned) start_heap ,time_passed);
+
+        fflush(stdout);
+
+        exit(0);
     }
-
-    for(i = 0; i < cc; ++i)
-      free(ptrs[i]);
-
-    for(i = 0; i < cc; ++i){
-      chunk_size = min_size + rand_r(&seed)%random_size;
-      ptrs[i] = malloc(chunk_size);
-    }
-
-    for(i = 0; i < cc; ++i){
-      chunk_size = min_size + rand_r(&seed)%random_size;
-      ptrs[i] = realloc(ptrs[i], chunk_size);
-    }
-
-    for(i = 0; i < cc; ++i)
-      free(ptrs[i]);
-
-
-    time_passed = stop_time(tv);
-    start_heap = end_heap() - (int) start_heap;
-
-    printf("{'memory':%d,'time':%ld}",(unsigned) start_heap ,time_passed);
-
-    fflush(stdout);
-
-    exit(0);
-  }
-  wait(&status);
+    wait(&status);
 }
 
 
 void start_time(struct timeval* tv){
-  gettimeofday(tv,NULL);
+    gettimeofday(tv,NULL);
 }
 
 long stop_time(struct timeval old_tv){
-  int sec, usec;
-  long time;
-  struct timeval curr_tv;
-  gettimeofday(&curr_tv, NULL);
-  sec = curr_tv.tv_sec - old_tv.tv_sec;
-  usec = curr_tv.tv_usec - old_tv.tv_usec;
-  time = sec*1000000+usec;
-  return time;
+    int sec, usec;
+    long time;
+    struct timeval curr_tv;
+    gettimeofday(&curr_tv, NULL);
+    sec = curr_tv.tv_sec - old_tv.tv_sec;
+    usec = curr_tv.tv_usec - old_tv.tv_usec;
+    time = sec*1000000+usec;
+    return time;
 }

@@ -5,12 +5,12 @@
 #define MMAP /* if defined use mmap() instead of sbrk/brk */
 
 #ifdef MMAP
-  void * end_heap(void);
+    void * end_heap(void);
 #endif
 
-#ifndef	_UNISTD_H /* USE WITH CAUTION brk() and sbrk() have been removed from the POSIX standard, most systems implement them but the parameter types may vary */
-  extern int brk(void *);
-  extern void *sbrk( );
+#ifndef _UNISTD_H /* USE WITH CAUTION brk() and sbrk() have been removed from the POSIX standard, most systems implement them but the parameter types may vary */
+    extern int brk(void *);
+    extern void *sbrk( );
 #endif
 
 #endif /*_brk_h */
