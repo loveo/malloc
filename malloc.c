@@ -4,17 +4,25 @@
 #include <errno.h>
 #include <string.h>
 
-struct node* list = NULL;
-void *break_address = 0;
-int SMALLEST_QUICK = 8;
+struct node* list = NULL;   /*The 'free list' holding both free and used nodes*/
+void *break_address = 0;    /*Address to end of heap where next memory chunk will be allocated*/
+int SMALLEST_QUICK = 8;     /*The smallest size of a quick block*/
 
-#define META_SIZE sizeof(struct node)
-#define make4(x) (((((x)-1)/4)*4)+4)
+/*Define strategies for more readability*/
+#define STRATEGY_FIRST 1
+#define STRATEGY_BEST  2
+#define STRATEGY_WORST 3
+#define STRATEGY_QUICK 4
 
+#define META_SIZE sizeof(struct node)   /*Define META_SIZE to equal the size of node struct*/
+#define make4(x) (((((x)-1)/4)*4)+4)    /*Define make4 to round up an integer to closest number divisible by 4*/
+
+/*Sets Strategy to default strategy if not defined*/
 #ifndef STRATEGY
-    int STRATEGY = 4;
+    int STRATEGY = STRATEGY_QUICK;
 #endif
 
+/*Defines qiuck list varaibles if user has defined NRQUICKLISTS*/
 #ifdef NRQUICKLISTS
     int QUICK_STEPS = NRQUICKLISTS;
 
@@ -22,6 +30,7 @@ int SMALLEST_QUICK = 8;
     struct node* quick_list[NRQUICKLISTS];
 #endif
 
+/*Defines default quick list variables otherwise*/
 #ifndef NRQUICKLISTS
     int BIGGEST_QUICK = 128;
     int QUICK_STEPS =  5;
@@ -60,10 +69,10 @@ void *malloc(size_t size){
     size = make4(size);
     /*Check what strategy should be used*/
     switch(STRATEGY){
-        case 1: return first_malloc(size);
-        case 2: return best_malloc(size);
-        case 3: return worst_malloc(size);
-        case 4: return quick_malloc(size);
+        case STRATEGY_FIRST: return first_malloc(size);
+        case STRATEGY_BEST:  return best_malloc(size);
+        case STRATEGY_WORST: return worst_malloc(size);
+        case STRATEGY_QUICK: return quick_malloc(size);
     }
     return NULL;
 }
@@ -73,7 +82,7 @@ void free(void *pointer){
     /*If it points nowhere, ignore it*/
     if(pointer == NULL) return;
     /*If malloc is using Quick Fit*/
-    if(STRATEGY == 4){
+    if(STRATEGY == STRATEGY_QUICK){
         /*Get the node containing the chunk*/
         struct node* node = ((struct node*) pointer-1);
         /*If this pointer wasn't given by malloc, ignore it since we can't free it*/
@@ -111,7 +120,7 @@ void *realloc(void *pointer, size_t size){
     size = make4(size);
 
     /*If Quick Fit is used, use another realloc method instead*/
-    if(STRATEGY == 4) return quick_realloc(pointer, size);
+    if(STRATEGY == STRATEGY_QUICK) return quick_realloc(pointer, size);
     /*Get node containing this chunk*/
     node = ((struct node*)pointer-1);
     /*If this pointer points to a chunk given by malloc*/
@@ -142,13 +151,15 @@ void *realloc(void *pointer, size_t size){
                 if(new_pointer == NULL) return NULL;
                 /*Copy contents from old node to new node*/
                 copy(node, new_pointer);
+                /*Free the old node since it's no longer used*/
+                free(node);
                 /*Return a pointer to the new nodes chunk*/
                 return new_pointer->chunk_pointer;   
             }
         }
         return pointer;
     }
-return NULL;
+    return NULL;
 }
 
 /*Chooses a node to use and tries to cut it to save some memory*/
@@ -168,12 +179,12 @@ void *choose_and_cut(struct node* node, size_t size){
         node->size = size;
 
         /*If we are using Quick Fit*/
-        if(STRATEGY == 4){
+        if(STRATEGY == STRATEGY_QUICK){
             /*If the left over size is small enough to fit Quick List*/
             if(cut_node->size <= BIGGEST_QUICK){
                 /*If size is 8, 16, 32, 64 etc*/
                 if(cut_node->size & ((cut_node->size -1) == 0)){
-                        /*Remove the node from the list and add it to the Quick List instead*/
+                    /*Remove the node from the list and add it to the Quick List instead*/
                     node->next = cut_node->next;
                     cut_node->next = NULL;
                     cut_node->prev = NULL;
@@ -225,7 +236,7 @@ struct node* create_memory(size_t size){
         node = new_node(p, node_size-META_SIZE);
 
         /*If we are using Quick Fit and node is small enough to fit Quick List*/
-        if(STRATEGY == 4 && size <= BIGGEST_QUICK){
+        if(STRATEGY == STRATEGY_QUICK && size <= BIGGEST_QUICK){
             /*Cut the node into many Quick Nodes*/
             quick_cut(node, size);
             /*Return a free Quick Node*/
@@ -409,8 +420,6 @@ void *quick_realloc(void *pointer, size_t size){
     struct node* node;
     struct node* new_node;
     void* p;
-    /*If no pointer was given, retun NULL*/
-    if(pointer == NULL) return NULL;
     /*Fetch the node holding this chunk*/
     node = (struct node*) pointer-1;
     /*If the pointer wasn't allocated by malloc, ignore call*/
