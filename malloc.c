@@ -17,6 +17,14 @@ int SMALLEST_QUICK = 8;     /*The smallest size of a quick block*/
 #define META_SIZE sizeof(struct node)   /*Define META_SIZE to equal the size of node struct*/
 #define make4(x) (((((x)-1)/4)*4)+4)    /*Define make4 to round up an integer to closest number divisible by 4*/
 
+
+/*OSX calls MAP_ANONYMOUS for MAP_ANON, so we redefine it to work on OSX machines*/
+#ifndef MAP_ANONYMOUS
+    #ifdef MAP_ANON
+        #define MAP_ANONYMOUS MAP_ANON
+    #endif
+#endif
+
 /*Sets Strategy to default strategy if not defined*/
 #ifndef STRATEGY
     int STRATEGY = STRATEGY_QUICK;
@@ -130,7 +138,7 @@ void *realloc(void *pointer, size_t size){
         /*If the old node is too large*/
         if(node->size >= size){
             /*Check if there is a point in cutting the old node*/
-            if(node->size - size - META_SIZE - 4 >= 0){
+            if(node->size - size - META_SIZE >= 4){
                 /*Return the old node, cutted to the new size*/
                 return choose_and_cut(node, size);
             }
@@ -140,7 +148,7 @@ void *realloc(void *pointer, size_t size){
                 /*Merge this node with the next one*/
                 concat_next(node);
                 /*If the newly merged node is worth cutting*/
-                if(node->size - size - META_SIZE - 4 >= 0){
+                if(node->size - size - META_SIZE >= 4){
                     /*Cut the newly merged node to save memory*/
                     choose_and_cut(node, size);
                 }
