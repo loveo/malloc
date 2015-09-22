@@ -92,7 +92,7 @@ void allocate(int min_size, int random_size, int cc){
         struct timeval tv;
         long time_passed;
         int seed = SEED;
-        void *start_heap = end_heap();
+        void *start_heap = endHeap();
         int chunk_size;
         start_time(&tv);
 
@@ -119,7 +119,7 @@ void allocate(int min_size, int random_size, int cc){
 
 
         time_passed = stop_time(tv);
-        start_heap = end_heap() - (int) start_heap;
+        start_heap = endHeap() - (int) start_heap;
 
         printf("{'memory':%d,'time':%ld}",(unsigned) start_heap ,time_passed);
 
