@@ -153,16 +153,18 @@ void *realloc(void *pointer, size_t size){
                     choose_and_cut(node, size);
                 }
             }else{/*If we can't merge with the next node*/
-                /*Create a new node (malloc)*/   
-                struct node* new_pointer = create_memory(size);
+                /*Create a new node (malloc)*/
+                void *new_pointer = malloc(size);
+                /*Find the new node*/
+                struct node* new_node = ((struct node*)new_pointer-1);
                 /*If given address was NULL, we are out of memory*/ 
                 if(new_pointer == NULL) return NULL;
                 /*Copy contents from old node to new node*/
-                copy(node, new_pointer);
+                copy(node, new_node);
                 /*Free the old node since it's no longer used*/
-                free(node);
+                free(node->chunk_pointer);
                 /*Return a pointer to the new nodes chunk*/
-                return new_pointer->chunk_pointer;   
+                return new_pointer;
             }
         }
         return pointer;
