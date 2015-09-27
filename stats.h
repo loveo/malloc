@@ -1,4 +1,6 @@
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 
-double* calculate_statistics(double*, int);
+void calculate_statistics(double*, int, double*);
