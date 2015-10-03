@@ -166,19 +166,20 @@ void pre_allocate(int primary_size, int secondary_size, int fragmentation_size, 
         fragmentation_count = 1;
 
     if(first_worst != 0)
-        primary_count = amount - fragmentation_size - 1;
+        primary_count = amount - fragmentation_count - 1;
 
     for(; i < primary_count; ++i){
         pointers[i] = malloc(primary_size);
     }
 
-    for(; i < amount-fragmentation_size; ++i){
+    for(; i < amount-fragmentation_count; ++i){
         pointers[i] = malloc(secondary_size);
     }
 
-    for(; i < amount+fragmentation_size; ++i){
+    for(; i < amount; ++i){
         pointers[i] = malloc(fragmentation_size);
     }
+
 }
 
 void random_pre_allocate(int sizes[], int size_count, void* pointers[], int amount){

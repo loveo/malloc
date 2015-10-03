@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <unistd.h>
-#include "node.h"
 
 
 void start_time(struct timeval*);
@@ -25,7 +24,7 @@ int size_count;
 #define TYPE_REASONABLE_SMALL 4
 
 /*Define allocation sizes for more readability*/
-#define SIZE_FRAGMENTATION sizeof(struct node)+4
+#define SIZE_FRAGMENTATION 55
 #define SIZE_SMALL 160
 #define SIZE_MEDIUM 220
 #define SIZE_LARGE 300
@@ -165,19 +164,20 @@ void pre_allocate(int primary_size, int secondary_size, int fragmentation_size, 
         fragmentation_count = 1;
 
     if(first_worst != 0)
-        primary_count = amount - fragmentation_size - 1;
+        primary_count = amount - fragmentation_count - 1;
 
     for(; i < primary_count; ++i){
         pointers[i] = malloc(primary_size);
     }
 
-    for(; i < amount-fragmentation_size; ++i){
+    for(; i < amount-fragmentation_count; ++i){
         pointers[i] = malloc(secondary_size);
     }
 
-    for(; i < amount+fragmentation_size; ++i){
+    for(; i < amount; ++i){
         pointers[i] = malloc(fragmentation_size);
     }
+
 }
 
 void random_pre_allocate(int sizes[], int size_count, void* pointers[], int amount){
