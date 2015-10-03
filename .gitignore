@@ -6,3 +6,6 @@ old_files/
 
 #ignore work file
 a.out
+
+#ignore test-data
+tests/
