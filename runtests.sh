@@ -6,7 +6,7 @@ mkdir "tests"
 
 #compile and copy outfiles
 echo "Compiling files..."
-gcc stats.c -o tests/stats.out
+gcc stats.c -o tests/stats.out -lm
 gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=1 -O3
 cp "a.out" "tests/t1.out"
 gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=2 -O3
