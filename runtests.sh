@@ -7,15 +7,15 @@ mkdir "tests"
 #compile and copy outfiles
 echo "Compiling files..."
 gcc stats.c -o tests/stats.out
-gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=1
+gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=1 -O3
 cp "a.out" "tests/t1.out"
-gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=2
+gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=2 -O3
 cp "a.out" "tests/t2.out"
-gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=3
+gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=3 -O3
 cp "a.out" "tests/t3.out"
-gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=4
+gcc tester.c brk.h malloc.c malloc.h node.c node.h -DSTRATEGY=4 -O3
 cp "a.out" "tests/t4.out"
-gcc real_malloc_tester.c node.h
+gcc real_malloc_tester.c -O3
 cp "a.out" "tests/t5.out"
 
 #run tests
@@ -108,7 +108,7 @@ echo "Running reasonable large case with quick fit"
 echo "Running reasonable small case with quick fit"
 ./t5.out 4 4 | ./stats.out > "real_malloc_reasonable_small_case_quick_fit.txt"
 
-rm "*.out"
+rm *.out
 echo "Testing completed!"
 
 
