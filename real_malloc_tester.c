@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include "node.h"
 
 
 void start_time(struct timeval*);
@@ -24,6 +25,7 @@ int size_count;
 #define TYPE_REASONABLE_SMALL 4
 
 /*Define allocation sizes for more readability*/
+#define SIZE_FRAGMENTATION sizeof(struct node)+4
 #define SIZE_SMALL 160
 #define SIZE_MEDIUM 220
 #define SIZE_LARGE 300
