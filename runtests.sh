@@ -108,6 +108,7 @@ echo "Running reasonable large case with quick fit"
 echo "Running reasonable small case with quick fit"
 ./t5.out 4 4 | ./stats.out > "real_malloc_reasonable_small_case_quick_fit.txt"
 
+#remove binary files
 rm *.out
 echo "Testing completed!"
 
