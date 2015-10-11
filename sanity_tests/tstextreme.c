@@ -46,10 +46,6 @@ int main(int argc, char *argv[]){
   highbreak = (void *) sbrk(0);
 #endif
 
-  fprintf(stderr, " low %f\n", lowbreak);
-
-  fprintf(stderr, " high %f\n", highbreak);
-
   fprintf(stderr,"%s: Used memory in test: 0x%x (= %2.2f * pagesize)\n",
 	  progname, (unsigned)(highbreak - lowbreak),
 	  ( 1.0 * ( highbreak - lowbreak )) / pagesize);
